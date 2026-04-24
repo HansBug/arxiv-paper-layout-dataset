@@ -26,11 +26,33 @@ GOLDEN_DIR = REPO / "tests" / "golden"
 
 
 def runs_root() -> Path:
-    """Location of cached per-paper pipeline outputs."""
+    """Primary location of cached per-paper pipeline outputs.
+
+    Tests additionally fall through to ``runs/v1_extra/`` when looking up
+    a paper, since the extra arXiv algorithm / listing papers live there.
+    Override with ``ALX_RUNS_ROOT`` (single root) or with
+    ``ALX_RUNS_ROOTS`` (``:``-separated list).
+    """
     return Path(os.environ.get("ALX_RUNS_ROOT", REPO / "runs" / "v1"))
 
 
+def runs_roots() -> list[Path]:
+    override = os.environ.get("ALX_RUNS_ROOTS")
+    if override:
+        return [Path(p) for p in override.split(":") if p]
+    roots = [runs_root()]
+    fallback = REPO / "runs" / "v1_extra"
+    if fallback != runs_root() and fallback.exists():
+        roots.append(fallback)
+    return roots
+
+
 def annotations_path(paper_id: str) -> Path:
+    for root in runs_roots():
+        p = root / paper_id / "dataset" / "annotations.json"
+        if p.exists():
+            return p
+    # return the primary path so callers can surface the expected location
     return runs_root() / paper_id / "dataset" / "annotations.json"
 
 

@@ -73,41 +73,73 @@ PREAMBLE_INJECTION = r"""
 % journal classes (A&A's aa.cls, for instance) clean up document-end hooks
 % before we can run. Emitting at begin-of-document is safe since \paperwidth
 % etc. are fixed by the time \begin{document} runs.
-\AtBeginDocument{%
-  \typeout{ARXIVLAYOUT-PAGEINFO paperwidth=\the\paperwidth\space paperheight=\the\paperheight\space textwidth=\the\textwidth\space textheight=\the\textheight\space oddsidemargin=\the\oddsidemargin\space evensidemargin=\the\evensidemargin\space topmargin=\the\topmargin\space headheight=\the\headheight\space headsep=\the\headsep\space columnwidth=\the\columnwidth\space columnsep=\the\columnsep}%
-  % algorithm2e hook: intercept its final-assembly macro so we get exact
-  % bounds for the *rendered* algorithm block -- above-title rule, caption,
-  % separator rule, pseudocode, below-algo rule. Without this hook both cap
-  % and body collapse to the same bbox because our alxmark span sits inside
-  % the raw float body and misses the rules that algocf@makethealgo prepends.
-  % The injector writes alx@current@alg@id before each algorithm float so the
-  % zsavepos names below can be tied back to the manifest without fighting
-  % counter drift across \input'd files.
-  \def\alx@current@alg@id{unset}%
+% Track the "current float id" so hook-emitted anchors can be tied back to
+% the manifest. The injector rewrites \gdef\alx@current@alg@id{<cap_id>}
+% just before each \begin{algorithm}/\begin{listing}.
+\def\alx@current@alg@id{unset}%
+
+% Hook bodies defined OUTSIDE \AtBeginDocument so the # param token survives
+% a single \def round-trip. \AtBeginDocument otherwise doubles each ##,
+% turning #1 into ##1 in the stored body and breaking the final expansion.
+\def\alx@install@algorithm2e@hook{%
   \@ifpackageloaded{algorithm2e}{%
     \@ifundefined{algocf@makethealgo}{}{%
       \let\alx@orig@a2e@makethealgo\algocf@makethealgo
       \def\algocf@makethealgo{%
         \vtop{%
-          \zsavepos{alx@a2e@captop@\alx@current@alg@id}%
+          \alxmark{alx@flt@top@\alx@current@alg@id}%
           \ifthenelse{\equal{\csname @algocf@capt@\algocf@style\endcsname}{above}}%
             {\csname algocf@caption@\algocf@style\endcsname}{}%
           \csname @algocf@pre@\algocf@style\endcsname%
           \ifthenelse{\equal{\csname @algocf@capt@\algocf@style\endcsname}{top}}%
             {\csname algocf@caption@\algocf@style\endcsname}{}%
-          \zsavepos{alx@a2e@algotop@\alx@current@alg@id}%
+          \alxmark{alx@flt@bodytop@\alx@current@alg@id}%
           \box\algocf@algobox%
-          \zsavepos{alx@a2e@algobot@\alx@current@alg@id}%
+          \alxmark{alx@flt@bodybot@\alx@current@alg@id}%
           \ifthenelse{\equal{\csname @algocf@capt@\algocf@style\endcsname}{bottom}}%
             {\csname algocf@caption@\algocf@style\endcsname}{}%
           \csname @algocf@post@\algocf@style\endcsname%
           \ifthenelse{\equal{\csname @algocf@capt@\algocf@style\endcsname}{under}}%
             {\csname algocf@caption@\algocf@style\endcsname}{}%
-          \zsavepos{alx@a2e@capbot@\alx@current@alg@id}%
+          \alxmark{alx@flt@bot@\alx@current@alg@id}%
         }%
       }%
     }%
   }{}%
+}
+
+\def\alx@install@float@hook{%
+  \@ifpackageloaded{float}{%
+    \@ifundefined{float@makebox}{}{%
+      \let\alx@orig@float@makebox\float@makebox
+      \renewcommand{\float@makebox}[1]{%
+        \vbox{\hsize=##1 \@parboxrestore
+          \alxmark{alx@flt@top@\alx@current@alg@id}%
+          \@fs@pre
+          \@fs@iftopcapt
+            \ifvoid\@floatcapt\else\unvbox\@floatcapt\par\@fs@mid\fi
+            \alxmark{alx@flt@bodytop@\alx@current@alg@id}%
+            \unvbox\@currbox
+            \alxmark{alx@flt@bodybot@\alx@current@alg@id}%
+          \else
+            \alxmark{alx@flt@bodytop@\alx@current@alg@id}%
+            \unvbox\@currbox
+            \alxmark{alx@flt@bodybot@\alx@current@alg@id}%
+            \ifvoid\@floatcapt\else\par\@fs@mid\unvbox\@floatcapt\fi
+          \fi
+          \par\@fs@post
+          \alxmark{alx@flt@bot@\alx@current@alg@id}%
+          \vskip\z@
+        }%
+      }%
+    }%
+  }{}%
+}
+
+\AtBeginDocument{%
+  \typeout{ARXIVLAYOUT-PAGEINFO paperwidth=\the\paperwidth\space paperheight=\the\paperheight\space textwidth=\the\textwidth\space textheight=\the\textheight\space oddsidemargin=\the\oddsidemargin\space evensidemargin=\the\evensidemargin\space topmargin=\the\topmargin\space headheight=\the\headheight\space headsep=\the\headsep\space columnwidth=\the\columnwidth\space columnsep=\the\columnsep}%
+  \alx@install@algorithm2e@hook%
+  \alx@install@float@hook%
 }
 \makeatother
 % ========== arxiv-paper-layout-dataset injection end ==========
@@ -313,7 +345,7 @@ class LatexBBoxInjector:
                 # body label uses algorithm2e-provided anchors when available.
                 new_body = self._wrap_algorithm_body(body, kind_body, float_id, cap_id)
             elif env in ("listing",):
-                new_body = self._wrap_listing_body(body, kind_body, float_id)
+                new_body = self._wrap_listing_body(body, kind_body, float_id, cap_id)
             else:
                 new_body = body
 
@@ -326,21 +358,16 @@ class LatexBBoxInjector:
             # the paper uses a different algorithm package, these will be
             # missing and the resolver falls back to the inner-top/bot pair.
             # anchor_names is a flat list of (top, bot) pairs tried in order.
-            # For non-algorithm floats the inner alxmark pair is the best we
-            # can do; we keep the outer pair only as an informational fallback
-            # (it captures text-flow position, not placement).
-            anchor_names = [inner_top, inner_bot, outer_top, outer_bot]
-            if env in ("algorithm", "algorithm2e"):
-                # Primary: the zsavepos pair dropped by our hook inside
-                # \algocf@makethealgo (exact top rule / bottom rule of the
-                # rendered algorithm block). Fallback: the inner alxmark pair
-                # for papers that don't use algorithm2e.
-                anchor_names = [
-                    f"alx@a2e@captop@{cap_id}",
-                    f"alx@a2e@capbot@{cap_id}",
-                    inner_top,
-                    inner_bot,
-                ]
+            # Primary pair: the zsavepos emitted by our hook on either
+            # algorithm2e's \algocf@makethealgo or the `float` package's
+            # \float@makebox -- each records the exact top rule / bottom rule
+            # of the rendered block. Secondary: the in-source alxmark inner
+            # pair, used when neither hook fires (e.g., a `figure` that has
+            # no custom float style). Tertiary: outer alxmark pair (kept for
+            # informational purposes; text-flow position, not placement).
+            primary_top = f"alx@flt@top@{cap_id}"
+            primary_bot = f"alx@flt@bot@{cap_id}"
+            anchor_names = [primary_top, primary_bot, inner_top, inner_bot, outer_top, outer_bot]
             self.manifest.labels.append(
                 LabeledAnchor(
                     label_id=cap_id,
@@ -351,18 +378,14 @@ class LatexBBoxInjector:
                 )
             )
 
-            # For algorithm envs we set \alx@current@alg@id so the preamble
-            # hook on \algocf@makethealgo knows which manifest id to tag.
-            # Uses \gdef so the value survives across the float's own \bgroup
-            # / \egroup, which is where \algocf@makethealgo actually fires.
-            # For algorithm envs we set \alx@current@alg@id so the preamble
-            # hook on \algocf@makethealgo knows which manifest id to tag.
-            # The \gdef must be wrapped in \makeatletter / \makeatother because
-            # we're at document-body catcodes here and ``@`` is "other";
-            # without makeatletter the control-sequence name would terminate
-            # at the first ``@`` and the rest would be literal text.
+            # For algorithm / listing floats we set \alx@current@alg@id so
+            # the preamble hook (\algocf@makethealgo or \float@makebox) knows
+            # which manifest id to tag its zsavepos anchors with. Uses \gdef
+            # so the value survives the float's own \bgroup/\egroup; wrapped
+            # in \makeatletter because ``@`` is "other"-catcode in document
+            # body and the control-sequence name would otherwise break.
             preamble = ""
-            if env in ("algorithm", "algorithm2e"):
+            if env in ("algorithm", "algorithm2e", "listing"):
                 preamble = (
                     f"\\makeatletter\\gdef\\alx@current@alg@id{{{cap_id}}}\\makeatother%\n"
                 )
@@ -432,16 +455,17 @@ class LatexBBoxInjector:
 
     def _wrap_algorithm_body(self, body: str, kind: str, float_id: str, cap_id: str) -> str:
         """For ``algorithm`` floats we emit a body label whose anchors come
-        from algorithm2e's internal ``\\algocf@makethealgo`` hook (see the
-        preamble injection). Those anchors — ``alx@a2e@algotop/algobot`` —
+        from the float-assembly hooks (``\\algocf@makethealgo`` for
+        algorithm2e, ``\\float@makebox`` for the plain ``algorithm`` /
+        ``float`` combo). Those anchors — ``alx@flt@bodytop/bodybot`` —
         bracket just the pseudocode box, excluding the title + separator
         rules. We also emit a pair of textual ``\\alxmark`` anchors as a
-        fallback for the non-algorithm2e `algorithm` package variant.
+        fallback for oddball algorithm packages that don't load ``float``.
         """
 
         label_id = self._next_id(kind)
-        alg_top = f"alx@a2e@algotop@{cap_id}"
-        alg_bot = f"alx@a2e@algobot@{cap_id}"
+        body_top = f"alx@flt@bodytop@{cap_id}"
+        body_bot = f"alx@flt@bodybot@{cap_id}"
         fallback_top = f"{label_id}-fallback-top"
         fallback_bot = f"{label_id}-fallback-bot"
 
@@ -450,9 +474,9 @@ class LatexBBoxInjector:
                 label_id=label_id,
                 kind=kind,
                 float_id=float_id,
-                # primary: algorithm2e-assembled anchors
+                # primary: hook-assembled anchors (pseudocode body only)
                 # fallback: \alxmark anchors placed in source
-                anchor_names=[alg_top, alg_bot, fallback_top, fallback_bot],
+                anchor_names=[body_top, body_bot, fallback_top, fallback_bot],
                 method="span",
             )
         )
@@ -481,40 +505,46 @@ class LatexBBoxInjector:
                 + body[cap_start:]
             )
 
-    def _wrap_listing_body(self, body: str, kind: str, float_id: str) -> str:
-        # For the `listing` float env we use \alxmark span markers only; there
-        # is no equivalent of algorithm2e's \algocf@makethealgo for listings,
-        # so the inner top/bot pair is the best we have. Caption handling
-        # mirrors `_wrap_algorithm_body` so the body excludes caption text.
+    def _wrap_listing_body(self, body: str, kind: str, float_id: str, cap_id: str = None) -> str:
+        """Same strategy as the algorithm body: prefer float@makebox hook
+        anchors, fall back to \\alxmark span around the caption."""
+
         label_id = self._next_id(kind)
-        top = f"{label_id}-top"
-        bot = f"{label_id}-bot"
+        # Primary pair via \float@makebox hook (same naming scheme as
+        # algorithms). cap_id is the enclosing listing_cap id.
+        if cap_id is not None:
+            primary_top = f"alx@flt@bodytop@{cap_id}"
+            primary_bot = f"alx@flt@bodybot@{cap_id}"
+        else:
+            primary_top = primary_bot = "__missing__"
+        fallback_top = f"{label_id}-fallback-top"
+        fallback_bot = f"{label_id}-fallback-bot"
         self.manifest.labels.append(
             LabeledAnchor(
                 label_id=label_id,
                 kind=kind,
                 float_id=float_id,
-                anchor_names=[top, bot],
+                anchor_names=[primary_top, primary_bot, fallback_top, fallback_bot],
                 method="span",
             )
         )
         caption_end = _find_caption_span(body)
         if caption_end is None:
-            return f"\n\\alxmark{{{top}}}%\n{body}\n\\alxmark{{{bot}}}%\n"
+            return f"\n\\alxmark{{{fallback_top}}}%\n{body}\n\\alxmark{{{fallback_bot}}}%\n"
         cap_start, cap_end = caption_end
         pre = body[:cap_start].strip()
         post = body[cap_end:].strip()
         if len(pre) < len(post):
             return (
                 body[:cap_end]
-                + f"\n\\alxmark{{{top}}}%\n"
+                + f"\n\\alxmark{{{fallback_top}}}%\n"
                 + body[cap_end:]
-                + f"\n\\alxmark{{{bot}}}%\n"
+                + f"\n\\alxmark{{{fallback_bot}}}%\n"
             )
         return (
-            f"\n\\alxmark{{{top}}}%\n"
+            f"\n\\alxmark{{{fallback_top}}}%\n"
             + body[:cap_start]
-            + f"\n\\alxmark{{{bot}}}%\n"
+            + f"\n\\alxmark{{{fallback_bot}}}%\n"
             + body[cap_start:]
         )
 

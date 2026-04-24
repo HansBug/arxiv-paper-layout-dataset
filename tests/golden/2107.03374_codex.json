@@ -1,0 +1,595 @@
+{
+  "categories": [
+    "fig",
+    "fig_cap",
+    "listing",
+    "table",
+    "table_cap"
+  ],
+  "num_pages": 31,
+  "labels": [
+    {
+      "label_id": "fig_1",
+      "kind": "fig",
+      "page": 2,
+      "bbox": [
+        155,
+        179,
+        652,
+        437
+      ]
+    },
+    {
+      "label_id": "fig_cap_1",
+      "kind": "fig_cap",
+      "page": 2,
+      "bbox": [
+        155,
+        179,
+        652,
+        730
+      ]
+    },
+    {
+      "label_id": "fig_2",
+      "kind": "fig",
+      "page": 3,
+      "bbox": [
+        368,
+        179,
+        921,
+        1001
+      ]
+    },
+    {
+      "label_id": "fig_cap_2",
+      "kind": "fig_cap",
+      "page": 3,
+      "bbox": [
+        155,
+        179,
+        1355,
+        1117
+      ]
+    },
+    {
+      "label_id": "fig_cap_3",
+      "kind": "fig_cap",
+      "page": 3,
+      "bbox": [
+        155,
+        1626,
+        652,
+        290
+      ]
+    },
+    {
+      "label_id": "listing_1",
+      "kind": "listing",
+      "page": 3,
+      "bbox": [
+        155,
+        1626,
+        652,
+        283
+      ]
+    },
+    {
+      "label_id": "fig_3",
+      "kind": "fig",
+      "page": 5,
+      "bbox": [
+        155,
+        179,
+        652,
+        407
+      ]
+    },
+    {
+      "label_id": "fig_4",
+      "kind": "fig",
+      "page": 5,
+      "bbox": [
+        857,
+        179,
+        652,
+        830
+      ]
+    },
+    {
+      "label_id": "fig_5",
+      "kind": "fig",
+      "page": 5,
+      "bbox": [
+        857,
+        1333,
+        652,
+        437
+      ]
+    },
+    {
+      "label_id": "fig_cap_4",
+      "kind": "fig_cap",
+      "page": 5,
+      "bbox": [
+        155,
+        179,
+        652,
+        556
+      ]
+    },
+    {
+      "label_id": "fig_cap_5",
+      "kind": "fig_cap",
+      "page": 5,
+      "bbox": [
+        857,
+        179,
+        652,
+        1127
+      ]
+    },
+    {
+      "label_id": "fig_cap_6",
+      "kind": "fig_cap",
+      "page": 5,
+      "bbox": [
+        857,
+        1333,
+        652,
+        586
+      ]
+    },
+    {
+      "label_id": "fig_6",
+      "kind": "fig",
+      "page": 6,
+      "bbox": [
+        155,
+        179,
+        652,
+        541
+      ]
+    },
+    {
+      "label_id": "fig_7",
+      "kind": "fig",
+      "page": 6,
+      "bbox": [
+        155,
+        999,
+        652,
+        639
+      ]
+    },
+    {
+      "label_id": "fig_cap_7",
+      "kind": "fig_cap",
+      "page": 6,
+      "bbox": [
+        155,
+        179,
+        652,
+        782
+      ]
+    },
+    {
+      "label_id": "fig_cap_8",
+      "kind": "fig_cap",
+      "page": 6,
+      "bbox": [
+        155,
+        999,
+        652,
+        780
+      ]
+    },
+    {
+      "label_id": "table_1",
+      "kind": "table",
+      "page": 6,
+      "bbox": [
+        897,
+        323,
+        567,
+        476
+      ]
+    },
+    {
+      "label_id": "table_cap_1",
+      "kind": "table_cap",
+      "page": 6,
+      "bbox": [
+        857,
+        179,
+        652,
+        620
+      ]
+    },
+    {
+      "label_id": "fig_8",
+      "kind": "fig",
+      "page": 8,
+      "bbox": [
+        857,
+        1151,
+        652,
+        437
+      ]
+    },
+    {
+      "label_id": "fig_cap_9",
+      "kind": "fig_cap",
+      "page": 8,
+      "bbox": [
+        857,
+        1151,
+        652,
+        628
+      ]
+    },
+    {
+      "label_id": "table_2",
+      "kind": "table",
+      "page": 8,
+      "bbox": [
+        315,
+        323,
+        1029,
+        309
+      ]
+    },
+    {
+      "label_id": "table_cap_2",
+      "kind": "table_cap",
+      "page": 8,
+      "bbox": [
+        155,
+        179,
+        1355,
+        453
+      ]
+    },
+    {
+      "label_id": "fig_9",
+      "kind": "fig",
+      "page": 9,
+      "bbox": [
+        155,
+        422,
+        652,
+        920
+      ]
+    },
+    {
+      "label_id": "fig_cap_10",
+      "kind": "fig_cap",
+      "page": 9,
+      "bbox": [
+        155,
+        422,
+        652,
+        1060
+      ]
+    },
+    {
+      "label_id": "table_3",
+      "kind": "table",
+      "page": 9,
+      "bbox": [
+        953,
+        354,
+        454,
+        114
+      ]
+    },
+    {
+      "label_id": "table_cap_3",
+      "kind": "table_cap",
+      "page": 9,
+      "bbox": [
+        857,
+        179,
+        652,
+        289
+      ]
+    },
+    {
+      "label_id": "fig_10",
+      "kind": "fig",
+      "page": 10,
+      "bbox": [
+        857,
+        179,
+        652,
+        427
+      ]
+    },
+    {
+      "label_id": "fig_cap_11",
+      "kind": "fig_cap",
+      "page": 10,
+      "bbox": [
+        857,
+        179,
+        652,
+        571
+      ]
+    },
+    {
+      "label_id": "listing_2",
+      "kind": "listing",
+      "page": 10,
+      "bbox": [
+        155,
+        996,
+        652,
+        917
+      ]
+    },
+    {
+      "label_id": "fig_11",
+      "kind": "fig",
+      "page": 11,
+      "bbox": [
+        857,
+        179,
+        652,
+        363
+      ]
+    },
+    {
+      "label_id": "fig_cap_12",
+      "kind": "fig_cap",
+      "page": 11,
+      "bbox": [
+        857,
+        179,
+        652,
+        547
+      ]
+    },
+    {
+      "label_id": "fig_12",
+      "kind": "fig",
+      "page": 15,
+      "bbox": [
+        155,
+        179,
+        652,
+        807
+      ]
+    },
+    {
+      "label_id": "fig_cap_13",
+      "kind": "fig_cap",
+      "page": 15,
+      "bbox": [
+        155,
+        179,
+        652,
+        1026
+      ]
+    },
+    {
+      "label_id": "listing_10",
+      "kind": "listing",
+      "page": 20,
+      "bbox": [
+        270,
+        1538,
+        652,
+        68
+      ]
+    },
+    {
+      "label_id": "listing_11",
+      "kind": "listing",
+      "page": 20,
+      "bbox": [
+        599,
+        1652,
+        652,
+        68
+      ]
+    },
+    {
+      "label_id": "listing_12",
+      "kind": "listing",
+      "page": 20,
+      "bbox": [
+        668,
+        1766,
+        652,
+        68
+      ]
+    },
+    {
+      "label_id": "listing_13",
+      "kind": "listing",
+      "page": 20,
+      "bbox": [
+        327,
+        179,
+        652,
+        1735
+      ]
+    },
+    {
+      "label_id": "listing_14",
+      "kind": "listing",
+      "page": 20,
+      "bbox": [
+        1492,
+        207,
+        208,
+        95
+      ]
+    },
+    {
+      "label_id": "listing_15",
+      "kind": "listing",
+      "page": 20,
+      "bbox": [
+        1499,
+        348,
+        201,
+        123
+      ]
+    },
+    {
+      "label_id": "listing_16",
+      "kind": "listing",
+      "page": 20,
+      "bbox": [
+        1186,
+        550,
+        514,
+        95
+      ]
+    },
+    {
+      "label_id": "listing_17",
+      "kind": "listing",
+      "page": 20,
+      "bbox": [
+        857,
+        816,
+        652,
+        321
+      ]
+    },
+    {
+      "label_id": "listing_4",
+      "kind": "listing",
+      "page": 20,
+      "bbox": [
+        790,
+        729,
+        652,
+        68
+      ]
+    },
+    {
+      "label_id": "listing_5",
+      "kind": "listing",
+      "page": 20,
+      "bbox": [
+        210,
+        877,
+        652,
+        68
+      ]
+    },
+    {
+      "label_id": "listing_6",
+      "kind": "listing",
+      "page": 20,
+      "bbox": [
+        595,
+        991,
+        652,
+        68
+      ]
+    },
+    {
+      "label_id": "listing_7",
+      "kind": "listing",
+      "page": 20,
+      "bbox": [
+        807,
+        1106,
+        652,
+        68
+      ]
+    },
+    {
+      "label_id": "listing_8",
+      "kind": "listing",
+      "page": 20,
+      "bbox": [
+        622,
+        1220,
+        652,
+        96
+      ]
+    },
+    {
+      "label_id": "listing_9",
+      "kind": "listing",
+      "page": 20,
+      "bbox": [
+        728,
+        1362,
+        652,
+        96
+      ]
+    },
+    {
+      "label_id": "fig_13",
+      "kind": "fig",
+      "page": 22,
+      "bbox": [
+        857,
+        179,
+        652,
+        480
+      ]
+    },
+    {
+      "label_id": "fig_cap_14",
+      "kind": "fig_cap",
+      "page": 22,
+      "bbox": [
+        857,
+        179,
+        652,
+        730
+      ]
+    },
+    {
+      "label_id": "listing_18",
+      "kind": "listing",
+      "page": 23,
+      "bbox": [
+        971,
+        1595,
+        652,
+        79
+      ]
+    },
+    {
+      "label_id": "listing_19",
+      "kind": "listing",
+      "page": 24,
+      "bbox": [
+        155,
+        345,
+        652,
+        262
+      ]
+    },
+    {
+      "label_id": "fig_14",
+      "kind": "fig",
+      "page": 28,
+      "bbox": [
+        857,
+        179,
+        652,
+        420
+      ]
+    },
+    {
+      "label_id": "fig_cap_15",
+      "kind": "fig_cap",
+      "page": 28,
+      "bbox": [
+        857,
+        179,
+        652,
+        792
+      ]
+    }
+  ]
+}
