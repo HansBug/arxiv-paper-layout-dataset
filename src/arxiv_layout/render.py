@@ -149,6 +149,13 @@ def resolve_labels(
             if top_page > bot_page:
                 top_page, bot_page = bot_page, top_page
 
+            # For multi-page spans we clip to the textblock vertical bounds
+            # so the emitted bbox doesn't bleed into headers / page numbers
+            # / footnote areas. Single-page spans keep their tight top-mark /
+            # bot-mark y's.
+            text_top = page_info.text_top_pt
+            text_bot = page_info.text_bot_pt
+
             for p in range(top_page, bot_page + 1):
                 page_h = pdf_page_heights_pt.get(p)
                 if page_h is None:
@@ -159,14 +166,13 @@ def resolve_labels(
                     y0, y1 = min(y_top, y_bot), max(y_top, y_bot)
                 elif p == chosen_top.abspage:
                     y0 = page_h - _pt_from_sp(chosen_top.posy_sp)
-                    y1 = page_h  # run to bottom of page
+                    y1 = min(text_bot, page_h)
                 elif p == chosen_bot.abspage:
-                    y0 = 0.0
+                    y0 = max(0.0, text_top)
                     y1 = page_h - _pt_from_sp(chosen_bot.posy_sp)
                 else:
-                    # intermediate page -- span the whole text block
-                    y0 = 0.0
-                    y1 = page_h
+                    y0 = max(0.0, text_top)
+                    y1 = min(text_bot, page_h)
                 resolved.append(
                     ResolvedLabel(
                         label_id=label.label_id,

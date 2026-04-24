@@ -77,12 +77,31 @@ class PageInfo:
     @property
     def text_left_pt(self) -> float:
         # LaTeX: x of text block = 1in + \hoffset + \oddsidemargin.
-        # \hoffset default 0. 1in = 72.27pt.
-        return 72.27 + self.oddsidemargin_sp / SP_PER_PT
+        # \hoffset default 0. 1in = 72.27 TeX pt; we want PDF pt so use the
+        # sp->PDF-pt conversion for the margin, plus a constant 72 (1 inch in
+        # PDF points) for the 1in base offset.
+        return 72.0 + self.oddsidemargin_sp / SP_PER_PT
 
     @property
     def text_right_pt(self) -> float:
         return self.text_left_pt + self.textwidth_sp / SP_PER_PT
+
+    @property
+    def text_top_pt(self) -> float:
+        """PDF-pt y-offset of the text block's top from the page top.
+
+        LaTeX places the text block at ``1in + \\voffset + \\topmargin +
+        \\headheight + \\headsep`` below the page's physical top. We
+        ignore ``\\voffset`` (defaults to 0 and we don't record it in
+        PAGEINFO) and compute the rest from sp dims converted to PDF pt.
+        """
+        return 72.0 + (
+            self.topmargin_sp + self.headheight_sp + self.headsep_sp
+        ) / SP_PER_PT
+
+    @property
+    def text_bot_pt(self) -> float:
+        return self.text_top_pt + self.textheight_sp / SP_PER_PT
 
     @property
     def textwidth_pt(self) -> float:
@@ -130,10 +149,17 @@ _DIM_RE = re.compile(r"(?P<name>\w+)=(?P<value>-?[\d.]+)(?P<unit>pt|sp)?")
 
 
 def _parse_dim(raw: str) -> int:
-    """Parse ``\\the\\paperwidth``-style output like ``614.295pt``. Returns sp."""
+    """Parse ``\\the\\paperwidth``-style output like ``614.295pt``.
+
+    Returns value in TeX sp (1 TeX-pt = 65536 sp). The "pt" that LaTeX's
+    ``\\the\\<dim>`` prints is TeX points (72.27 per inch), not PDF points;
+    we keep the value in TeX-sp here and let downstream consumers divide
+    by ``SP_PER_PT`` (sp per *PDF* pt = ``SP_PER_TEX_PT * 72.27/72``) when
+    they need PDF coordinates for PyMuPDF.
+    """
     m = re.match(r"\s*(-?[\d.]+)\s*pt\s*$", raw)
     if m:
-        return int(round(float(m.group(1)) * SP_PER_PT))
+        return int(round(float(m.group(1)) * SP_PER_TEX_PT))
     m = re.match(r"\s*(-?[\d.]+)\s*sp\s*$", raw)
     if m:
         return int(round(float(m.group(1))))
