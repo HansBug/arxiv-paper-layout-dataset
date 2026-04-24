@@ -30,6 +30,11 @@ import json
 import sys
 from pathlib import Path
 
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "src"))
+
+from arxiv_layout.corpus import ARXIV_ARCHIVES  # noqa: E402
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -72,14 +77,19 @@ def main() -> int:
         ctl = {}
     ctl_summary = {k: v for k, v in ctl.items() if k != "note"}
 
+    archives_hist = stats.get("archive_histogram", {}) or {}
+    untouched = sorted(a for a in ARXIV_ARCHIVES if a not in archives_hist)
+    covered = sorted(a for a in ARXIV_ARCHIVES if a in archives_hist)
+
     parts = [
         "SNAPSHOT",
         f"papers_ok={stats.get('papers_ok', 0)}",
         f"papers_failed={stats.get('papers_failed', 0)}",
         f"pages_with_labels={stats.get('pages_with_labels', 0)}",
         "kinds=" + json.dumps(stats.get("labels_by_kind", {}), ensure_ascii=False),
-        "archives="
-        + json.dumps(stats.get("archive_histogram", {}), ensure_ascii=False),
+        "archives=" + json.dumps(archives_hist, ensure_ascii=False),
+        f"archive_coverage={len(covered)}/{len(ARXIV_ARCHIVES)}",
+        "untouched_archives=" + json.dumps(untouched, ensure_ascii=False),
         "top_cats=" + json.dumps(top_cats, ensure_ascii=False),
         "fail_reasons=" + json.dumps(fails, ensure_ascii=False),
         "fails_by_cat=" + json.dumps(top_fails_by_cat, ensure_ascii=False),

@@ -328,28 +328,44 @@ monitors on ``driver.log`` + ``state.json``:
    failure clusters without human-in-the-loop at paper granularity.
 
    ```bash
-   while sleep 600; do
-     python3 -c "
-   import json; from pathlib import Path
-   s = json.loads(Path('runs/corpus/state.json').read_text())
-   st = s.get('stats', {})
-   fails = {}
-   for p in s.get('papers', {}).values():
-       if p.get('status') == 'failed':
-           fails[p.get('reason','?')] = fails.get(p.get('reason','?'),0)+1
-   print('SNAPSHOT',
-         'papers_ok='+str(st.get('papers_ok',0)),
-         'kinds='+json.dumps(st.get('labels_by_kind',{})),
-         'archives='+json.dumps(st.get('archive_histogram',{})),
-         'top_cats='+json.dumps(dict(sorted(st.get('primary_category_histogram',{}).items(),key=lambda x:-x[1])[:8])),
-         'fails='+json.dumps(fails))"
-   done
+   while sleep 600; do python3 scripts/corpus_snapshot.py; done
    ```
+
+   ``scripts/corpus_snapshot.py`` prints one ``SNAPSHOT ...`` line per
+   tick with ``papers_ok`` / ``papers_failed`` / ``kinds`` /
+   ``archives`` / ``archive_coverage=N/20`` /
+   ``untouched_archives`` / ``top_cats`` / ``fail_reasons`` /
+   ``fails_by_cat`` / active ``control``.
 
    Each tick ⇒ one event ⇒ the agent inspects label / archive /
    failure-reason balance and writes an updated
    ``<root>/control.json`` if needed. Because the driver reloads the
    file each step, interventions land on the very next paper.
+
+   **Intervention policy for the slow monitor**:
+
+   - **Label-kind balance**: the eight classes (``fig / fig_cap /
+     table / table_cap / algorithm / algorithm_cap / listing /
+     listing_cap``) should all be populated. If any are still 0 after
+     a few dozen papers, ``force_next_archive`` toward an archive that
+     tends to produce them (``cs`` for ``algorithm`` / ``listing``,
+     ``stat`` / ``q-bio`` for tables).
+   - **Domain balance**: the corpus should eventually visit every one
+     of the 20 top-level arXiv archives. The snapshot's
+     ``untouched_archives`` key is the authoritative list; rotate
+     ``force_next_archive`` through it so coverage reaches 20/20,
+     **don't rely on ``BalancedQueryStrategy`` alone** — the stock
+     "least covered" rule is tie-broken randomly, so in practice one
+     archive can dominate for hundreds of papers before the scheduler
+     wanders to a new bucket.
+   - **Failure clustering**: if a specific ``primary_category``
+     accounts for the majority of failures (e.g. ``nlin.SI`` with
+     ``no zref anchors in aux``, which is endemic to pure-math
+     papers), add it to ``skip_primary_cats``.
+   - **Clear ``force_next_archive`` after it has served its purpose**
+     (usually after the targeted archive has 3-5 successful papers),
+     or the driver will stay pinned there forever. Setting it back to
+     ``null`` hands control back to the default scheduler.
 
 ## Export to Ultralytics YOLO format
 
