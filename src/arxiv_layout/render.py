@@ -109,42 +109,47 @@ def resolve_labels(
                 )
             )
         elif label.method == "span":
-            # ``anchor_names`` is either 2 (inner-only: algorithm / listing
-            # body) or 4 (caps: outer-top, outer-bot, inner-top, inner-bot).
-            # We use the INNER pair because outer marks live in the ambient
-            # text flow -- when a float migrates off-source-page they give a
-            # misleading tiny strip on the wrong page.
-            if len(label.anchor_names) == 4:
-                inner_top_name = label.anchor_names[2]
-                inner_bot_name = label.anchor_names[3]
-            elif len(label.anchor_names) == 2:
-                inner_top_name = label.anchor_names[0]
-                inner_bot_name = label.anchor_names[1]
-            else:
+            # ``anchor_names`` is a flat list of (top, bot) pairs tried in
+            # order. Pick the first pair where both ends resolved and live on
+            # the same page -- that's the most precise source we have.
+            if len(label.anchor_names) % 2 != 0:
+                continue
+            chosen_top: Anchor | None = None
+            chosen_bot: Anchor | None = None
+            chosen_top_name: str | None = None
+            for i in range(0, len(label.anchor_names), 2):
+                top_name = label.anchor_names[i]
+                bot_name = label.anchor_names[i + 1]
+                t = anchors.get(top_name)
+                b = anchors.get(bot_name)
+                if t is None or b is None:
+                    continue
+                if t.abspage != b.abspage:
+                    continue
+                chosen_top = t
+                chosen_bot = b
+                chosen_top_name = top_name
+                break
+            if chosen_top is None or chosen_bot is None:
                 continue
 
-            inner_top = anchors.get(inner_top_name)
-            inner_bot = anchors.get(inner_bot_name)
-            if inner_top is None or inner_bot is None:
-                continue
-            if inner_top.abspage != inner_bot.abspage:
-                continue
-            page = inner_top.abspage
+            page = chosen_top.abspage
             page_h = pdf_page_heights_pt.get(page)
             if page_h is None:
                 continue
 
-            # X-extent: exact hsize reported by the inner-top \alxmark.
-            inner_top_mark = marks.get(inner_top_name)
-            if inner_top_mark is not None and inner_top_mark.hsize_sp > 0:
-                hsize_pt = inner_top_mark.hsize_sp / SP_PER_PT
+            # X-extent: use \the\hsize reported at the mark's location when
+            # available; otherwise fall back to column geometry.
+            mark_info = marks.get(chosen_top_name) if chosen_top_name else None
+            if mark_info is not None and mark_info.hsize_sp > 0:
+                hsize_pt = mark_info.hsize_sp / SP_PER_PT
             else:
                 hsize_pt = page_info.columnwidth_pt or page_info.textwidth_pt
-            x0 = _pt_from_sp(inner_top.posx_sp)
+            x0 = _pt_from_sp(chosen_top.posx_sp)
             x1 = x0 + hsize_pt
 
-            y_top = page_h - _pt_from_sp(inner_top.posy_sp)
-            y_bot = page_h - _pt_from_sp(inner_bot.posy_sp)
+            y_top = page_h - _pt_from_sp(chosen_top.posy_sp)
+            y_bot = page_h - _pt_from_sp(chosen_bot.posy_sp)
             y0 = min(y_top, y_bot)
             y1 = max(y_top, y_bot)
             resolved.append(

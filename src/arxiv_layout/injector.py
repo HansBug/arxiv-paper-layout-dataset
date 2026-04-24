@@ -75,6 +75,39 @@ PREAMBLE_INJECTION = r"""
 % etc. are fixed by the time \begin{document} runs.
 \AtBeginDocument{%
   \typeout{ARXIVLAYOUT-PAGEINFO paperwidth=\the\paperwidth\space paperheight=\the\paperheight\space textwidth=\the\textwidth\space textheight=\the\textheight\space oddsidemargin=\the\oddsidemargin\space evensidemargin=\the\evensidemargin\space topmargin=\the\topmargin\space headheight=\the\headheight\space headsep=\the\headsep\space columnwidth=\the\columnwidth\space columnsep=\the\columnsep}%
+  % algorithm2e hook: intercept its final-assembly macro so we get exact
+  % bounds for the *rendered* algorithm block -- above-title rule, caption,
+  % separator rule, pseudocode, below-algo rule. Without this hook both cap
+  % and body collapse to the same bbox because our alxmark span sits inside
+  % the raw float body and misses the rules that algocf@makethealgo prepends.
+  % The injector writes alx@current@alg@id before each algorithm float so the
+  % zsavepos names below can be tied back to the manifest without fighting
+  % counter drift across \input'd files.
+  \def\alx@current@alg@id{unset}%
+  \@ifpackageloaded{algorithm2e}{%
+    \@ifundefined{algocf@makethealgo}{}{%
+      \let\alx@orig@a2e@makethealgo\algocf@makethealgo
+      \def\algocf@makethealgo{%
+        \vtop{%
+          \zsavepos{alx@a2e@captop@\alx@current@alg@id}%
+          \ifthenelse{\equal{\csname @algocf@capt@\algocf@style\endcsname}{above}}%
+            {\csname algocf@caption@\algocf@style\endcsname}{}%
+          \csname @algocf@pre@\algocf@style\endcsname%
+          \ifthenelse{\equal{\csname @algocf@capt@\algocf@style\endcsname}{top}}%
+            {\csname algocf@caption@\algocf@style\endcsname}{}%
+          \zsavepos{alx@a2e@algotop@\alx@current@alg@id}%
+          \box\algocf@algobox%
+          \zsavepos{alx@a2e@algobot@\alx@current@alg@id}%
+          \ifthenelse{\equal{\csname @algocf@capt@\algocf@style\endcsname}{bottom}}%
+            {\csname algocf@caption@\algocf@style\endcsname}{}%
+          \csname @algocf@post@\algocf@style\endcsname%
+          \ifthenelse{\equal{\csname @algocf@capt@\algocf@style\endcsname}{under}}%
+            {\csname algocf@caption@\algocf@style\endcsname}{}%
+          \zsavepos{alx@a2e@capbot@\alx@current@alg@id}%
+        }%
+      }%
+    }%
+  }{}%
 }
 \makeatother
 % ========== arxiv-paper-layout-dataset injection end ==========
@@ -217,13 +250,16 @@ class LatexBBoxInjector:
     # -- public API ---------------------------------------------------------
 
     def inject(self, tex: str) -> str:
-        tex = self._inject_preamble(tex)
+        # Scan + rewrite floats FIRST so the preamble's comment text (which
+        # mentions \begin{algorithm} etc. only as documentation) doesn't get
+        # picked up by the env regex.
         tex = self._inject_floats(tex, env="figure", kind_body="fig")
         tex = self._inject_floats(tex, env="table", kind_body="table")
         tex = self._inject_floats(tex, env="algorithm", kind_body="algorithm")
         tex = self._inject_floats(tex, env="algorithm2e", kind_body="algorithm")
         tex = self._inject_floats(tex, env="listing", kind_body="listing")
         tex = self._inject_standalone_lstlisting(tex)
+        tex = self._inject_preamble(tex)
         return tex
 
     # -- helpers ------------------------------------------------------------
@@ -264,40 +300,75 @@ class LatexBBoxInjector:
 
             float_id = self._next_id(f"{env}_float")
 
+            cap_id = self._next_id(kind_cap)
+
             # decide what the atomic "body" is for this env.
             if env in ("figure",):
                 new_body = self._wrap_graphics(body, kind_body, float_id)
-                # if figure contains no \includegraphics, fall back to wrapping
-                # a standalone tikzpicture (common in math papers).
                 if new_body == body:
                     new_body = self._wrap_tikzpictures(body, kind_body, float_id)
             elif env in ("table",):
                 new_body = self._wrap_tabulars(body, kind_body, float_id)
             elif env in ("algorithm", "algorithm2e"):
-                new_body = self._wrap_algorithm_body(body, kind_body, float_id)
+                # body label uses algorithm2e-provided anchors when available.
+                new_body = self._wrap_algorithm_body(body, kind_body, float_id, cap_id)
             elif env in ("listing",):
                 new_body = self._wrap_listing_body(body, kind_body, float_id)
             else:
                 new_body = body
 
-            cap_id = self._next_id(kind_cap)
             outer_top = f"{cap_id}-outer-top"
             outer_bot = f"{cap_id}-outer-bot"
             inner_top = f"{cap_id}-inner-top"
             inner_bot = f"{cap_id}-inner-bot"
+            # For algorithm floats we also pick up the algorithm2e-specific
+            # anchors (see injector preamble): alx@a2e@captop / capbot. When
+            # the paper uses a different algorithm package, these will be
+            # missing and the resolver falls back to the inner-top/bot pair.
+            # anchor_names is a flat list of (top, bot) pairs tried in order.
+            # For non-algorithm floats the inner alxmark pair is the best we
+            # can do; we keep the outer pair only as an informational fallback
+            # (it captures text-flow position, not placement).
+            anchor_names = [inner_top, inner_bot, outer_top, outer_bot]
+            if env in ("algorithm", "algorithm2e"):
+                # Primary: the zsavepos pair dropped by our hook inside
+                # \algocf@makethealgo (exact top rule / bottom rule of the
+                # rendered algorithm block). Fallback: the inner alxmark pair
+                # for papers that don't use algorithm2e.
+                anchor_names = [
+                    f"alx@a2e@captop@{cap_id}",
+                    f"alx@a2e@capbot@{cap_id}",
+                    inner_top,
+                    inner_bot,
+                ]
             self.manifest.labels.append(
                 LabeledAnchor(
                     label_id=cap_id,
                     kind=kind_cap,
                     float_id=float_id,
-                    # order: outer-top, outer-bot, inner-top, inner-bot
-                    anchor_names=[outer_top, outer_bot, inner_top, inner_bot],
+                    anchor_names=anchor_names,
                     method="span",
                 )
             )
 
+            # For algorithm envs we set \alx@current@alg@id so the preamble
+            # hook on \algocf@makethealgo knows which manifest id to tag.
+            # Uses \gdef so the value survives across the float's own \bgroup
+            # / \egroup, which is where \algocf@makethealgo actually fires.
+            # For algorithm envs we set \alx@current@alg@id so the preamble
+            # hook on \algocf@makethealgo knows which manifest id to tag.
+            # The \gdef must be wrapped in \makeatletter / \makeatother because
+            # we're at document-body catcodes here and ``@`` is "other";
+            # without makeatletter the control-sequence name would terminate
+            # at the first ``@`` and the rest would be literal text.
+            preamble = ""
+            if env in ("algorithm", "algorithm2e"):
+                preamble = (
+                    f"\\makeatletter\\gdef\\alx@current@alg@id{{{cap_id}}}\\makeatother%\n"
+                )
             return (
-                f"\\alxmark{{{outer_top}}}%\n"
+                preamble
+                + f"\\alxmark{{{outer_top}}}%\n"
                 f"{begin}%\n"
                 f"\\alxmark{{{inner_top}}}%\n"
                 f"{new_body}"
@@ -359,20 +430,62 @@ class LatexBBoxInjector:
 
         return _TABULAR.sub(sub, body)
 
-    def _wrap_algorithm_body(self, body: str, kind: str, float_id: str) -> str:
-        """For ``algorithm`` / ``listing`` floats we use top/bot span markers
-        to bracket the pseudocode / code (i.e., the visual body), skipping
-        over the caption which can appear at either end of the float.
-
-        ``body`` here is the *inside* of ``\\begin{algorithm}...\\end{algorithm}``.
-        We look for ``\\caption{...}``; if it appears, the code region is
-        everything *outside* the caption. We put our markers accordingly:
-
-        - caption at top: top mark goes AFTER the caption, bot mark at end
-        - caption at bottom: top mark at start, bot mark BEFORE the caption
-        - no caption: wrap the whole body
+    def _wrap_algorithm_body(self, body: str, kind: str, float_id: str, cap_id: str) -> str:
+        """For ``algorithm`` floats we emit a body label whose anchors come
+        from algorithm2e's internal ``\\algocf@makethealgo`` hook (see the
+        preamble injection). Those anchors — ``alx@a2e@algotop/algobot`` —
+        bracket just the pseudocode box, excluding the title + separator
+        rules. We also emit a pair of textual ``\\alxmark`` anchors as a
+        fallback for the non-algorithm2e `algorithm` package variant.
         """
 
+        label_id = self._next_id(kind)
+        alg_top = f"alx@a2e@algotop@{cap_id}"
+        alg_bot = f"alx@a2e@algobot@{cap_id}"
+        fallback_top = f"{label_id}-fallback-top"
+        fallback_bot = f"{label_id}-fallback-bot"
+
+        self.manifest.labels.append(
+            LabeledAnchor(
+                label_id=label_id,
+                kind=kind,
+                float_id=float_id,
+                # primary: algorithm2e-assembled anchors
+                # fallback: \alxmark anchors placed in source
+                anchor_names=[alg_top, alg_bot, fallback_top, fallback_bot],
+                method="span",
+            )
+        )
+
+        caption_end = _find_caption_span(body)
+        if caption_end is None:
+            return f"\n\\alxmark{{{fallback_top}}}%\n{body}\n\\alxmark{{{fallback_bot}}}%\n"
+
+        cap_start, cap_end = caption_end
+        pre = body[:cap_start].strip()
+        post = body[cap_end:].strip()
+        if len(pre) < len(post):
+            # caption at top -> body is after caption
+            return (
+                body[:cap_end]
+                + f"\n\\alxmark{{{fallback_top}}}%\n"
+                + body[cap_end:]
+                + f"\n\\alxmark{{{fallback_bot}}}%\n"
+            )
+        else:
+            # caption at bottom -> body is before caption
+            return (
+                f"\n\\alxmark{{{fallback_top}}}%\n"
+                + body[:cap_start]
+                + f"\n\\alxmark{{{fallback_bot}}}%\n"
+                + body[cap_start:]
+            )
+
+    def _wrap_listing_body(self, body: str, kind: str, float_id: str) -> str:
+        # For the `listing` float env we use \alxmark span markers only; there
+        # is no equivalent of algorithm2e's \algocf@makethealgo for listings,
+        # so the inner top/bot pair is the best we have. Caption handling
+        # mirrors `_wrap_algorithm_body` so the body excludes caption text.
         label_id = self._next_id(kind)
         top = f"{label_id}-top"
         bot = f"{label_id}-bot"
@@ -385,36 +498,25 @@ class LatexBBoxInjector:
                 method="span",
             )
         )
-
         caption_end = _find_caption_span(body)
         if caption_end is None:
             return f"\n\\alxmark{{{top}}}%\n{body}\n\\alxmark{{{bot}}}%\n"
-
         cap_start, cap_end = caption_end
-        # Decide whether caption is "at top" or "at bottom" based on how much
-        # content appears before vs after it.
         pre = body[:cap_start].strip()
         post = body[cap_end:].strip()
         if len(pre) < len(post):
-            # caption at top -> body is after caption
             return (
                 body[:cap_end]
                 + f"\n\\alxmark{{{top}}}%\n"
                 + body[cap_end:]
                 + f"\n\\alxmark{{{bot}}}%\n"
             )
-        else:
-            # caption at bottom -> body is before caption
-            return (
-                f"\n\\alxmark{{{top}}}%\n"
-                + body[:cap_start]
-                + f"\n\\alxmark{{{bot}}}%\n"
-                + body[cap_start:]
-            )
-
-    def _wrap_listing_body(self, body: str, kind: str, float_id: str) -> str:
-        # Same strategy as algorithm: use a top/bot span excluding caption.
-        return self._wrap_algorithm_body(body, kind, float_id)
+        return (
+            f"\n\\alxmark{{{top}}}%\n"
+            + body[:cap_start]
+            + f"\n\\alxmark{{{bot}}}%\n"
+            + body[cap_start:]
+        )
 
     def _inject_standalone_lstlisting(self, tex: str) -> str:
         """lstlisting / minted outside of a ``listing`` float. These get no
@@ -487,29 +589,38 @@ class MultiFileInjector:
         return self.injector.manifest
 
     def inject_tree(self, src_root: Path, exts: tuple[str, ...] = (".tex",)) -> list[Path]:
+        # Two-pass: rewrite every fragment first (so one shared injector
+        # counter assigns sequential ids across the whole tree), then
+        # prepend the preamble into the file that owns \begin{document}.
+        paths = [p for p in src_root.rglob("*") if p.is_file() and p.suffix in exts]
+        # stable ordering: main-doc first, then everything else by path
+        paths.sort(key=lambda p: (not self._has_begin_document(p), p.as_posix()))
         modified: list[Path] = []
-        for path in src_root.rglob("*"):
-            if not path.is_file() or path.suffix not in exts:
-                continue
+        for path in paths:
             try:
                 text = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
-            if "\\begin{document}" in text:
-                new = self.injector.inject(text)
-            else:
-                new = self._inject_fragment(text)
+            new = self._inject_floats_only(text)
+            if "\\begin{document}" in new:
+                new = self.injector._inject_preamble(new)
             if new != text:
                 path.write_text(new, encoding="utf-8")
                 modified.append(path)
         return modified
 
-    def _inject_fragment(self, tex: str) -> str:
-        # reuse every inject step except the preamble addition
-        tex = self.injector._inject_floats(tex, env="figure", kind_body="fig")
-        tex = self.injector._inject_floats(tex, env="table", kind_body="table")
-        tex = self.injector._inject_floats(tex, env="algorithm", kind_body="algorithm")
-        tex = self.injector._inject_floats(tex, env="algorithm2e", kind_body="algorithm")
-        tex = self.injector._inject_floats(tex, env="listing", kind_body="listing")
-        tex = self.injector._inject_standalone_lstlisting(tex)
+    def _has_begin_document(self, path: Path) -> bool:
+        try:
+            return "\\begin{document}" in path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+
+    def _inject_floats_only(self, tex: str) -> str:
+        inj = self.injector
+        tex = inj._inject_floats(tex, env="figure", kind_body="fig")
+        tex = inj._inject_floats(tex, env="table", kind_body="table")
+        tex = inj._inject_floats(tex, env="algorithm", kind_body="algorithm")
+        tex = inj._inject_floats(tex, env="algorithm2e", kind_body="algorithm")
+        tex = inj._inject_floats(tex, env="listing", kind_body="listing")
+        tex = inj._inject_standalone_lstlisting(tex)
         return tex

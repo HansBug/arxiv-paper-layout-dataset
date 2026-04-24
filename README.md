@@ -122,16 +122,41 @@ A longer write-up aimed at contributors / LLM agents lives in
 
 ## Testing
 
+Tests compare a fingerprint (sorted labels + integer-pixel bboxes) of
+every cached `runs/v1/<paper_id>/dataset/annotations.json` against the
+committed snapshot under `tests/golden/`. The pipeline itself takes
+minutes per paper, so tests never re-run it — populate `runs/v1/` first:
+
 ```bash
+# one-time (takes a while)
+python3 scripts/build_dataset.py
+
+# then
 pytest -q tests/
 ```
 
-Regression tests pin the per-kind label counts and bbox positions for a
-handful of reference papers. If a change regresses bbox precision, the
-tests fail; if a change *intentionally* improves precision, re-baseline:
+The default tolerance is 2 pixels per coordinate; override via
+`ALX_BBOX_TOL=<int> pytest`. Tests `skip` a paper whose workspace hasn't
+been built yet.
+
+If a change *intentionally* improves precision, re-baseline the
+affected papers:
 
 ```bash
 python3 scripts/regen_golden.py --papers <paper_id>
+```
+
+### Adding more coverage (algorithm / listing cases)
+
+Extra papers with `algorithm` / `algorithm2e` / `lstlisting` blocks can be
+pulled straight from arXiv via:
+
+```bash
+python3 scripts/fetch_test_papers.py          # downloads into runs/test_papers_src
+python3 scripts/build_dataset.py \
+  --source-root runs/test_papers_src \
+  --work-root   runs/v1_extra
+python3 scripts/regen_golden.py               # with ALX_RUNS_ROOT=runs/v1_extra
 ```
 
 ## Known limitations

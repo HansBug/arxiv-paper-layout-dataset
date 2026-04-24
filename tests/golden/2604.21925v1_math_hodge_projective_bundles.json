@@ -1,0 +1,53 @@
+{
+  "categories": [
+    "fig",
+    "fig_cap"
+  ],
+  "num_pages": 18,
+  "labels": [
+    {
+      "label_id": "fig_1",
+      "kind": "fig",
+      "page": 8,
+      "bbox": [
+        741,
+        586,
+        224,
+        232
+      ]
+    },
+    {
+      "label_id": "fig_cap_1",
+      "kind": "fig_cap",
+      "page": 8,
+      "bbox": [
+        201,
+        586,
+        1305,
+        299
+      ]
+    },
+    {
+      "label_id": "fig_2",
+      "kind": "fig",
+      "page": 12,
+      "bbox": [
+        279,
+        346,
+        1148,
+        445
+      ]
+    },
+    {
+      "label_id": "fig_cap_2",
+      "kind": "fig_cap",
+      "page": 12,
+      "bbox": [
+        201,
+        346,
+        1305,
+        545
+      ]
+    }
+  ]
+}
