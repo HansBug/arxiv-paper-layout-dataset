@@ -280,10 +280,16 @@ class BalancedQueryStrategy:
                 if lo <= y <= hi:
                     total += cnt
             return total
-        buckets = sorted(self.year_buckets, key=score)
-        # small randomness to avoid pathological determinism
-        self.rng.shuffle(buckets[: max(1, len(buckets) // 2)])
-        return buckets[0]
+        scored = sorted(self.year_buckets, key=score)
+        # Randomly pick among all buckets tied for the minimum score.
+        # (Previous version did ``self.rng.shuffle(scored[:n])`` — but
+        # slicing returns a copy, so that shuffle was a no-op and the
+        # scheduler was deterministically stuck on the first
+        # min-score bucket whenever ties existed, e.g. the three
+        # zero-coverage older year bands.)
+        min_score = score(scored[0])
+        tied = [b for b in scored if score(b) == min_score]
+        return self.rng.choice(tied)
 
     def pick(
         self,
