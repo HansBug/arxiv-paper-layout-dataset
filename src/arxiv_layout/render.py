@@ -166,13 +166,20 @@ def resolve_labels(
 def union_span_with_bodies(
     labels: list[ResolvedLabel],
     manifest: InjectionManifest,
+    anchors: dict[str, Anchor] | None = None,
+    pdf_page_heights_pt: dict[int, float] | None = None,
 ) -> list[ResolvedLabel]:
-    """Expand a ``*_cap`` box so it also covers every body box in the same
-    float on the same page.
+    """Expand a ``*_cap`` box so it covers
 
-    The span anchor's hsize already tells us the correct horizontal budget,
-    so we only need to union on Y and to make sure a body that extends
-    slightly past the span still fits inside the cap.
+    - every body box in the same float on the same page, and
+    - the actual caption region reported by our ``\\@makecaption`` hook
+      (``alx@cap@top@<cap_id>`` / ``alx@cap@bot@<cap_id>``).
+
+    The ``\\@makecaption`` anchors are the only reliable way to learn the
+    caption's true bottom: in-source ``\\alxmark{...-inner-bot}`` sits after
+    whatever the author stuck between ``\\caption{…}`` and ``\\end{figure}``
+    (``\\label``, ``\\vspace*{-…}``, etc), and a negative vspace slides the
+    mark up inside the caption body.
     """
 
     body_by_float: dict[str, list[ResolvedLabel]] = {}
@@ -189,20 +196,31 @@ def union_span_with_bodies(
             body_by_float.setdefault(fid, []).append(lab)
 
     for fid, cap in cap_by_float.items():
-        bodies_on_page = [b for b in body_by_float.get(fid, []) if b.page == cap.page]
-        if not bodies_on_page:
-            continue
         c = cap.bbox_pt
-        body_x0 = min(b.bbox_pt.x0 for b in bodies_on_page)
-        body_x1 = max(b.bbox_pt.x1 for b in bodies_on_page)
-        body_y0 = min(b.bbox_pt.y0 for b in bodies_on_page)
-        body_y1 = max(b.bbox_pt.y1 for b in bodies_on_page)
-        cap.bbox_pt = BBox(
-            x0=min(c.x0, body_x0),
-            y0=min(c.y0, body_y0),
-            x1=max(c.x1, body_x1),
-            y1=max(c.y1, body_y1),
-        )
+        x0, y0, x1, y1 = c.x0, c.y0, c.x1, c.y1
+
+        bodies_on_page = [b for b in body_by_float.get(fid, []) if b.page == cap.page]
+        if bodies_on_page:
+            x0 = min(x0, *(b.bbox_pt.x0 for b in bodies_on_page))
+            x1 = max(x1, *(b.bbox_pt.x1 for b in bodies_on_page))
+            y0 = min(y0, *(b.bbox_pt.y0 for b in bodies_on_page))
+            y1 = max(y1, *(b.bbox_pt.y1 for b in bodies_on_page))
+
+        # Extend using @makecaption anchors if they're on the same page.
+        if anchors is not None and pdf_page_heights_pt is not None:
+            top_a = anchors.get(f"alx@cap@top@{cap.label_id}")
+            bot_a = anchors.get(f"alx@cap@bot@{cap.label_id}")
+            for a in (top_a, bot_a):
+                if a is None or a.abspage != cap.page:
+                    continue
+                page_h = pdf_page_heights_pt.get(cap.page)
+                if page_h is None:
+                    continue
+                y_here = page_h - a.posy_sp / SP_PER_PT
+                y0 = min(y0, y_here)
+                y1 = max(y1, y_here)
+
+        cap.bbox_pt = BBox(x0=x0, y0=y0, x1=x1, y1=y1)
     return labels
 
 

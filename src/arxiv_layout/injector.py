@@ -108,6 +108,23 @@ PREAMBLE_INJECTION = r"""
   }{}%
 }
 
+% Hook \@makecaption so we see where a caption's text actually ends, without
+% having to rely on the in-source \alxmark span landing past trailing
+% \vspace*{-...} / \label tokens after the user's \caption{...}. Stores the
+% coords using \alx@current@alg@id (set by the injector right before every
+% figure/table/algorithm/listing opening) so the right cap can be found by
+% anchor name alone.
+\def\alx@install@makecaption@hook{%
+  \@ifundefined{@makecaption}{}{%
+    \let\alx@orig@makecaption\@makecaption
+    \long\def\@makecaption##1##2{%
+      \alxmark{alx@cap@top@\alx@current@alg@id}%
+      \alx@orig@makecaption{##1}{##2}%
+      \alxmark{alx@cap@bot@\alx@current@alg@id}%
+    }%
+  }%
+}
+
 \def\alx@install@float@hook{%
   \@ifpackageloaded{float}{%
     \@ifundefined{float@makebox}{}{%
@@ -140,6 +157,7 @@ PREAMBLE_INJECTION = r"""
   \typeout{ARXIVLAYOUT-PAGEINFO paperwidth=\the\paperwidth\space paperheight=\the\paperheight\space textwidth=\the\textwidth\space textheight=\the\textheight\space oddsidemargin=\the\oddsidemargin\space evensidemargin=\the\evensidemargin\space topmargin=\the\topmargin\space headheight=\the\headheight\space headsep=\the\headsep\space columnwidth=\the\columnwidth\space columnsep=\the\columnsep}%
   \alx@install@algorithm2e@hook%
   \alx@install@float@hook%
+  \alx@install@makecaption@hook%
 }
 \makeatother
 % ========== arxiv-paper-layout-dataset injection end ==========
@@ -222,6 +240,36 @@ _TIKZPICTURE = re.compile(
     r".*?\\end\{tikzpicture\}",
     re.DOTALL,
 )
+
+
+def _has_caption_call(body: str) -> bool:
+    """True if ``body`` calls ``\\caption{…}`` that belongs to its own
+    enclosing float (as opposed to a nested algorithm / listing / figure /
+    table whose caption we already instrument separately).
+
+    The detection is intentionally crude -- there's no LaTeX parser here,
+    but the arxiv papers we process don't typically nest captioned floats
+    inside each other except via the ``\\begin{xxx}...\\end{xxx}`` pattern.
+    We strip any fully-nested float body out first, then look for a
+    top-level ``\\caption``.
+    """
+    # drop commented lines
+    cleaned_lines = []
+    for line in body.splitlines():
+        if line.lstrip().startswith("%"):
+            continue
+        cleaned_lines.append(line)
+    cleaned = "\n".join(cleaned_lines)
+
+    # remove nested floats that carry their own caption
+    for env in ("figure", "table", "algorithm", "algorithm2e", "listing"):
+        pattern = re.compile(
+            r"\\begin\{" + env + r"\*?\}.*?\\end\{" + env + r"\*?\}",
+            re.DOTALL,
+        )
+        cleaned = pattern.sub("", cleaned)
+
+    return re.search(r"(?<!\\)\\caption\b", cleaned) is not None
 
 
 def _find_caption_span(body: str) -> tuple[int, int] | None:
@@ -332,22 +380,59 @@ class LatexBBoxInjector:
 
             float_id = self._next_id(f"{env}_float")
 
-            cap_id = self._next_id(kind_cap)
-
-            # decide what the atomic "body" is for this env.
-            if env in ("figure",):
-                new_body = self._wrap_graphics(body, kind_body, float_id)
-                if new_body == body:
-                    new_body = self._wrap_tikzpictures(body, kind_body, float_id)
-            elif env in ("table",):
-                new_body = self._wrap_tabulars(body, kind_body, float_id)
+            # Atomic-body wrapping + cap-id allocation.
+            #
+            # For every figure/table/algorithm/listing float we ALWAYS set
+            # \alx@current@alg@id (the shared "current float id" the LaTeX
+            # hooks read), so that downstream \caption calls emit hook
+            # anchors tied to THIS float's cap id. Otherwise the previous
+            # float's cap id silently carries over, and a later caption in
+            # an un-instrumented figure overwrites the stored coords of an
+            # earlier cap anchor.
+            #
+            # We emit fig_cap / table_cap ONLY when either (a) we wrapped an
+            # atomic body (includegraphics / tikzpicture / tabular), or (b)
+            # the body contains a ``\caption{...}`` -- the caption hook will
+            # give us real coords for the cap. Otherwise the figure is just
+            # a wrapper around some other instrumented float (DDPM's two
+            # side-by-side algorithm-bearing minipages) and adding a cap
+            # label would just mis-paint the whole wrapper red.
+            wrapped = False
+            has_caption = _has_caption_call(body)
+            if env == "figure":
+                trial = self._wrap_graphics(body, kind_body, float_id)
+                if trial == body:
+                    trial = self._wrap_tikzpictures(body, kind_body, float_id)
+                wrapped = trial != body
+                new_body = trial
+            elif env == "table":
+                trial = self._wrap_tabulars(body, kind_body, float_id)
+                wrapped = trial != body
+                new_body = trial
             elif env in ("algorithm", "algorithm2e"):
-                # body label uses algorithm2e-provided anchors when available.
+                cap_id = self._next_id(kind_cap)
                 new_body = self._wrap_algorithm_body(body, kind_body, float_id, cap_id)
-            elif env in ("listing",):
+                wrapped = True
+            elif env == "listing":
+                cap_id = self._next_id(kind_cap)
                 new_body = self._wrap_listing_body(body, kind_body, float_id, cap_id)
+                wrapped = True
             else:
                 new_body = body
+
+            emit_cap = wrapped or (env in ("figure", "table") and has_caption)
+            if not emit_cap:
+                # figure/table wrapper with nothing to instrument: still set
+                # \alx@current@alg@id to a fresh sentinel so our caption
+                # hook (if it fires) doesn't write to a previous float's id.
+                sentinel = self._next_id(f"{env}_unused")
+                return (
+                    f"\\makeatletter\\gdef\\alx@current@alg@id{{{sentinel}}}\\makeatother%\n"
+                    f"{match.group(0)}"
+                )
+
+            if env in ("figure", "table"):
+                cap_id = self._next_id(kind_cap)
 
             outer_top = f"{cap_id}-outer-top"
             outer_bot = f"{cap_id}-outer-bot"
@@ -384,11 +469,20 @@ class LatexBBoxInjector:
             # so the value survives the float's own \bgroup/\egroup; wrapped
             # in \makeatletter because ``@`` is "other"-catcode in document
             # body and the control-sequence name would otherwise break.
-            preamble = ""
-            if env in ("algorithm", "algorithm2e", "listing"):
-                preamble = (
-                    f"\\makeatletter\\gdef\\alx@current@alg@id{{{cap_id}}}\\makeatother%\n"
-                )
+            # Every instrumented float sets \alx@current@alg@id so our hooks
+            # (algorithm2e, float@makebox, @makecaption) can tie their
+            # zsavepos anchors back to this cap_id. The \gdef is wrapped in
+            # \makeatletter because ``@`` is "other" cat in document body.
+            preamble = (
+                f"\\makeatletter\\gdef\\alx@current@alg@id{{{cap_id}}}\\makeatother%\n"
+            )
+            # After each instrumented float we reset \alx@current@alg@id to a
+            # neutral sentinel. Otherwise a stale value from the previous
+            # float survives and gets reused by LaTeX internals (e.g.
+            # \float@makebox fired for a different deferred block on a
+            # later page, clobbering the anchor coords of the last float
+            # whose id we actually cared about).
+            reset_id = self._next_id(f"{env}_done")
             return (
                 preamble
                 + f"\\alxmark{{{outer_top}}}%\n"
@@ -397,7 +491,8 @@ class LatexBBoxInjector:
                 f"{new_body}"
                 f"\n\\alxmark{{{inner_bot}}}%\n"
                 f"{end}%\n"
-                f"\\alxmark{{{outer_bot}}}"
+                f"\\alxmark{{{outer_bot}}}%\n"
+                f"\\makeatletter\\gdef\\alx@current@alg@id{{{reset_id}}}\\makeatother%\n"
             )
 
         return pattern.sub(sub, tex)
@@ -562,12 +657,14 @@ class LatexBBoxInjector:
             )
 
             def sub(match: re.Match) -> str:
-                # Skip if inside a listing float -- crude but effective:
-                # we already processed listing floats, so their contents got
-                # top/bot markers; detect presence of ``\\alxmark{listing_``
-                # surrounding the lstlisting and bail.
-                context_before = tex[max(0, match.start() - 400): match.start()]
-                if re.search(r"\\alxmark\{listing_\d+-top\}", context_before):
+                # Skip lstlistings that live inside an already-instrumented
+                # algorithm / listing float (perceiver wraps an lstlisting
+                # inside an algorithm env; we want the algorithm label to
+                # own the bbox, not a duplicate listing on top of it).
+                context_before = tex[max(0, match.start() - 600): match.start()]
+                if re.search(r"alx@flt@bodytop@(listing|algorithm)_", context_before):
+                    return match.group(0)
+                if re.search(r"\\alxmark\{(listing|algorithm)_\d+-fallback-top\}", context_before):
                     return match.group(0)
                 label_id = self._next_id("listing")
                 top = f"{label_id}-top"

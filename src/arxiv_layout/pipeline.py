@@ -242,7 +242,12 @@ def process_paper(paper_src: Path, work_root: Path, dpi: int = 200, original_eng
         page_info,
         page_heights_pt(pages_meta),
     )
-    labels = union_span_with_bodies(labels, multi.manifest)
+    labels = union_span_with_bodies(
+        labels,
+        multi.manifest,
+        anchors=anchors,
+        pdf_page_heights_pt=page_heights_pt(pages_meta),
+    )
 
     # Clip to page bounds (in pt) before writing
     page_rects = {p["abspage"]: (p["width_pt"], p["height_pt"]) for p in pages_meta}

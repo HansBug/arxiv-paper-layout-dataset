@@ -53,6 +53,24 @@ tests/              # golden-output regression tests (see below).
   `\zposy` only return values after the `.aux` has been written AND read
   back in the *next* run; extracting `\zref@newlabel{…}{\posx{…}\posy{…}
   \abspage{…}}` directly from the `.aux` is cycle-free.
+- **Convert sp -> PDF pt with the 72.27/72 factor.** TeX uses 72.27 pt/in
+  internally, the PDF user-space unit is 72 pt/in. Dividing by 65536 alone
+  gives you *TeX* pt; flipping those against a PyMuPDF-derived page height
+  (which is in PDF pt) drifts every y-coord by ~0.4% of its value — visible
+  at the bottom of a letter page as a 1-3 pt cut-off of bottom rules.
+  `extractor.SP_PER_PT` already embeds the ratio; use it and you're fine.
+- **Always set `\alx@current@alg@id`, even for un-instrumented floats.**
+  Every `\begin{figure}` / `\begin{table}` we *don't* emit a cap for still
+  sets `\alx@current@alg@id` to a sentinel id so the shared
+  `\@makecaption` hook doesn't write anchor coords to a *previous*
+  float's id. Otherwise a subsequent `\caption` inside an un-instrumented
+  wrapper can clobber the caption bottom of the previous figure.
+- **Hook bodies defined at top-level `\def`, not inside `\AtBeginDocument`.**
+  `\AtBeginDocument`'s accumulator leaves `##` un-reduced on the first
+  pass, so `##1` in the source becomes `##1` in the stored
+  `\float@makebox` body, turning `\hsize=##1` into `\hsize=0`. Put the
+  hook installer in its own top-level macro and call *that* from
+  `\AtBeginDocument`.
 
 ## Regression tests
 

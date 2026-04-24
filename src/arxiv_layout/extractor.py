@@ -15,7 +15,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-SP_PER_PT = 65536
+# TeX uses 72.27 pt per inch historically; PDF's user-space unit is 1/72 inch.
+# Positions read from \pdflastxpos / \pdflastypos (and from \zref@newlabel) are
+# in TeX scaled points. PyMuPDF page.rect is in PDF points. Going sp -> PDF pt
+# requires BOTH the 65536 sp/pt division AND the 72.27/72 ratio -- skipping the
+# latter shifts every anchor by ~0.4%, which is 1-3 PDF-pt at the bottom of a
+# letter page and visibly cuts off bottom rules in the rendered QC.
+_SP_PER_TEX_PT = 65536
+_TEX_PT_PER_INCH = 72.27
+_PDF_PT_PER_INCH = 72.0
+SP_PER_PT = _SP_PER_TEX_PT * _TEX_PT_PER_INCH / _PDF_PT_PER_INCH  # sp per PDF-pt
+SP_PER_TEX_PT = _SP_PER_TEX_PT  # kept for callers that want TeX-pt explicitly
 
 
 @dataclass

@@ -42,12 +42,21 @@ CANDIDATE_PAPERS = [
     ("1611.05431", "resnext",                {"algorithm"}),
     ("2006.04768", "linformer",              {"algorithm"}),
     ("2004.10964", "don_t_stop_pretraining", {"algorithm"}),
-    ("2006.11239", "ddpm",                   {"algorithm"}),
+    ("2006.11239", "ddpm",                   {"algorithm"}),  # minipage-wraps-algorithm pattern
     ("1706.10295", "prioritized_replay",     {"algorithm"}),
     ("1911.12889", "deepmind_data_augmentation", {"algorithm"}),
     ("1812.06162", "empirical_ntk",          {"algorithm"}),
     ("2006.09011", "score_sde",              {"algorithm"}),
     ("1802.09477", "td3",                    {"algorithm"}),
+    # additional edge-case coverage (added later)
+    ("2103.00020", "clip",                   {"algorithm"}),           # multiple algorithm2e floats
+    ("2305.10601", "tot",                    {"algorithm"}),           # tree-of-thoughts
+    ("1703.10593", "cyclegan",               {"algorithm"}),
+    ("2007.02500", "swav",                   {"algorithm"}),
+    ("2006.07733", "byol",                   {"algorithm"}),
+    ("2010.02193", "perceiver",              {"algorithm"}),
+    ("2302.13971", "llama",                  {"algorithm"}),
+    ("1904.08779", "specaugment",            {"algorithm"}),
 ]
 
 
