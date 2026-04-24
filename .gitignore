@@ -17,3 +17,5 @@ __pycache__/
 *.fls
 *.fdb_latexmk
 *.synctex.gz
+runs/yolo_dataset/
+runs/arxiv_catalog*.parquet

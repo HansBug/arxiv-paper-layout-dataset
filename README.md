@@ -155,9 +155,64 @@ pulled straight from arXiv via:
 python3 scripts/fetch_test_papers.py          # downloads into runs/test_papers_src
 python3 scripts/build_dataset.py \
   --source-root runs/test_papers_src \
-  --work-root   runs/v2_validated_extra
-python3 scripts/regen_golden.py               # with ALX_RUNS_ROOT=runs/v2_validated_extra
+  --work-root   runs/v2_extra
+ALX_RUNS_ROOT=runs/v2_extra python3 scripts/regen_golden.py
 ```
+
+## Bulk-fetch arXiv metadata
+
+`scripts/fetch_arxiv_catalog.py` queries the arXiv export API across all
+top-level archives (cs / math / physics / astro-ph / cond-mat / gr-qc /
+hep-* / math-ph / nlin / nucl-* / q-bio / q-fin / quant-ph / stat / eess /
+econ) and saves the flattened metadata to a Parquet file. Each row
+carries the paper's id, abs/pdf/source URLs, title, abstract, authors,
+publication / update timestamps, primary + cross-listed categories,
+comment, journal ref and DOI.
+
+```bash
+python3 scripts/fetch_arxiv_catalog.py \
+  --out runs/arxiv_catalog.parquet \
+  --per-archive 500
+```
+
+Rate-limited at 3s between requests per arXiv's stated policy; budget
+~15 min for the full 20-archive run at `--per-archive 500`.
+
+## Export to Ultralytics YOLO format
+
+`scripts/export_yolo.py` turns the pipeline outputs under
+`runs/v2_validated/` + `runs/v2_extra/` into a ready-to-train
+Ultralytics YOLO dataset. The default 8:1:1 split is **deterministic**:
+the sample's filename stem embeds both `arxiv_id` and `page_id`, and
+its split is picked by `sha256(stem) % 10` → 0-7 train / 8 val / 9 test.
+Same stem always lands in the same split, even across re-runs.
+
+```bash
+python3 scripts/export_yolo.py \
+  --input runs/v2_validated runs/v2_extra \
+  --out   runs/yolo_dataset
+  # optional: --split 7:2:1 to override the ratio
+  # optional: --symlink for dev only (default copies images so the dataset
+  #                                   is portable to a remote training host)
+```
+
+Layout:
+
+```
+runs/yolo_dataset/
+  data.yaml                           # class names + split paths
+  images/{train,val,test}/<paper_id>__page_<NNN>.png
+  labels/{train,val,test}/<paper_id>__page_<NNN>.txt
+```
+
+Each `.txt` has one row per instance:
+
+```
+<class_index> <cx_norm> <cy_norm> <w_norm> <h_norm>
+```
+
+Classes are listed in the order `fig / fig_cap / table / table_cap /
+algorithm / algorithm_cap / listing / listing_cap`.
 
 ## Known limitations
 
