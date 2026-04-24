@@ -165,10 +165,15 @@ def fetch_candidates(
     """Query arxiv for papers in ``cat:<archive> OR cat:<archive>.*`` within
     the given submission-year window. Returns lightweight metadata dicts.
     """
-    query = f"cat:{archive} OR cat:{archive}.*"
-    # arxiv's query syntax doesn't officially support year-in-submittedDate
-    # filtering cleanly, so we over-fetch and filter by published year client-side.
-    # We still sort by recency so the first pages are recent papers.
+    # arxiv's search_query *does* support submittedDate range filtering:
+    #   submittedDate:[YYYYMMDDhhmm TO YYYYMMDDhhmm]
+    # Without it, sortBy=submittedDate + offset=0 just returns the latest
+    # papers (2026+), which the client-side year filter then drops whole,
+    # so older year buckets silently return zero candidates forever.
+    date_range = (
+        f"submittedDate:[{year_lo}01010000 TO {year_hi}12312359]"
+    )
+    query = f"(cat:{archive} OR cat:{archive}.*) AND {date_range}"
     params = {
         "search_query": query,
         "sortBy": "submittedDate",
