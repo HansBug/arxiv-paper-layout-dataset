@@ -274,6 +274,83 @@ prints archive / year / primary-category / kind / boxes-per-page
 histograms plus the top failure reasons (compile timeouts, absent
 zref anchors, download errors, etc).
 
+### Hot intervention via ``control.json``
+
+The driver re-reads ``<root>/control.json`` at the top of every
+scheduler step, so you can steer the crawl **without stopping or
+restarting it**. A missing / malformed file is a no-op. Keys:
+
+```json
+{
+  "skip_primary_cats":  ["nlin.SI", "math.AG"],
+  "skip_archive_query": ["nlin"],
+  "force_next_archive": "cs",
+  "note": "pushing cs to unlock algorithm / listing classes"
+}
+```
+
+- ``skip_primary_cats`` — candidate papers with this ``primary_category``
+  are dropped before the pipeline runs. Use to blacklist sub-archives
+  whose papers keep failing (e.g. pure-math floats that never emit zref
+  anchors).
+- ``skip_archive_query`` — archives excluded from
+  ``BalancedQueryStrategy.pick``'s rotation. The scheduler otherwise
+  keeps picking the least-covered archive, which won't rescue you from
+  a cluster of failures all in one archive.
+- ``force_next_archive`` — pins the next query's archive. Use this to
+  deliberately surface underrepresented label kinds (e.g. ``cs`` for
+  ``algorithm`` / ``listing``).
+- ``note`` — free-form; logged once per step as ``[control] note=...``.
+
+The driver prints ``[control] skip_cats=[...] | force=... | note=...``
+at the start of every step where any of those keys are non-empty, so
+the intervention is visible in ``driver.log``.
+
+### Recommended two-monitor pattern
+
+When an agent (or you) is steering the crawl, run **two** parallel
+monitors on ``driver.log`` + ``state.json``:
+
+1. **Fast-broadcast monitor** — short interval, one event per paper
+   completion. Surfaces ``[query]`` / candidate id / ``OK|FAIL`` /
+   ``kinds:`` + ``archives`` / ``cats`` lines. Purpose: immediate
+   visibility, cheap to reason about.
+
+   ```bash
+   tail -n0 -F runs/corpus/driver.log \
+     | grep -E --line-buffered \
+         "^\[query\]|^  -> |^     OK|^     FAIL|^papers:|^kinds:|^archives |^cats |^\[control\]|^\[skip|Traceback|Error|OOM|Killed"
+   ```
+
+2. **Slow-intervention monitor** — long interval (5-15 min), emits a
+   compact balance snapshot so you can decide whether to update
+   ``control.json``. Purpose: rebalance label kinds / archives /
+   failure clusters without human-in-the-loop at paper granularity.
+
+   ```bash
+   while sleep 600; do
+     python3 -c "
+   import json; from pathlib import Path
+   s = json.loads(Path('runs/corpus/state.json').read_text())
+   st = s.get('stats', {})
+   fails = {}
+   for p in s.get('papers', {}).values():
+       if p.get('status') == 'failed':
+           fails[p.get('reason','?')] = fails.get(p.get('reason','?'),0)+1
+   print('SNAPSHOT',
+         'papers_ok='+str(st.get('papers_ok',0)),
+         'kinds='+json.dumps(st.get('labels_by_kind',{})),
+         'archives='+json.dumps(st.get('archive_histogram',{})),
+         'top_cats='+json.dumps(dict(sorted(st.get('primary_category_histogram',{}).items(),key=lambda x:-x[1])[:8])),
+         'fails='+json.dumps(fails))"
+   done
+   ```
+
+   Each tick ⇒ one event ⇒ the agent inspects label / archive /
+   failure-reason balance and writes an updated
+   ``<root>/control.json`` if needed. Because the driver reloads the
+   file each step, interventions land on the very next paper.
+
 ## Export to Ultralytics YOLO format
 
 `scripts/export_yolo.py` turns any pipeline output tree(s) -- the

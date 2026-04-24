@@ -48,6 +48,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import io
+import json
 import os
 import random
 import shutil
@@ -84,6 +85,37 @@ from arxiv_layout.pipeline import process_paper  # noqa: E402
 ARXIV_API = "http://export.arxiv.org/api/query"
 USER_AGENT = "arxiv-paper-layout-dataset/1.0 (continuous-pipeline)"
 RATE_LIMIT_SEC = 3.1
+
+CONTROL_FILENAME = "control.json"
+
+
+def _load_control(root: Path) -> dict:
+    """Hot-reload an intervention file each step without restarting the
+    driver. Missing / malformed files degrade gracefully to no-op. Keys:
+
+    - ``skip_primary_cats`` (list[str]): candidate papers whose
+      ``primary_category`` is in this list are dropped before the
+      pipeline runs. Use this to blacklist a sub-archive that keeps
+      failing (e.g. ``nlin.SI`` when it's mostly un-instrumentable
+      pure-math papers).
+    - ``skip_archive_query`` (list[str]): archives excluded from
+      :meth:`BalancedQueryStrategy.pick`'s rotation.
+    - ``force_next_archive`` (str | null): override the scheduler for
+      the next query (useful to prioritise an underrepresented class
+      like ``cs`` when ``algorithm`` / ``listing`` are still 0).
+    - ``note`` (str): free-form comment (ignored by code, shown in log).
+    """
+    path = root / CONTROL_FILENAME
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[control] WARN: failed to read {path}: {exc}", flush=True)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
 
 
 def _arxiv_api_call(url: str, attempts: int = 3, timeout: int = 60) -> bytes:
@@ -379,7 +411,28 @@ class Driver:
 
     def step(self) -> bool:
         """Run a single query + process cycle. Returns True if work done."""
-        pick = self.strategy.pick(self.state)
+        control = _load_control(self.root)
+        skip_primary_cats = set(control.get("skip_primary_cats") or [])
+        skip_archive_query = control.get("skip_archive_query") or []
+        force_next_archive = control.get("force_next_archive")
+        if control:
+            parts = []
+            if skip_primary_cats:
+                parts.append(f"skip_cats={sorted(skip_primary_cats)}")
+            if skip_archive_query:
+                parts.append(f"skip_archives={list(skip_archive_query)}")
+            if force_next_archive:
+                parts.append(f"force={force_next_archive}")
+            if control.get("note"):
+                parts.append(f"note={control['note']!r}")
+            if parts:
+                print("[control] " + " | ".join(parts), flush=True)
+
+        pick = self.strategy.pick(
+            self.state,
+            avoid_archives=skip_archive_query,
+            force_archive=force_next_archive,
+        )
         if pick is None:
             print("[stop] no archives below quota.", flush=True)
             return False
@@ -417,8 +470,16 @@ class Driver:
                 return True
             if self.state.seen(cand["arxiv_id"]):
                 continue
+            primary = cand.get("primary_category") or ""
+            if primary in skip_primary_cats:
+                print(
+                    f"  [skip-cat] {cand['arxiv_id']} [{primary}]  "
+                    f"(primary in skip_primary_cats)",
+                    flush=True,
+                )
+                continue
             print(
-                f"  -> {cand['arxiv_id']} [{cand.get('primary_category','?')}]  "
+                f"  -> {cand['arxiv_id']} [{primary or '?'}]  "
                 f"{cand['title'][:60]}",
                 flush=True,
             )

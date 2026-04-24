@@ -285,12 +285,31 @@ class BalancedQueryStrategy:
         self.rng.shuffle(buckets[: max(1, len(buckets) // 2)])
         return buckets[0]
 
-    def pick(self, state: CorpusState) -> tuple[str, tuple[int, int]] | None:
+    def pick(
+        self,
+        state: CorpusState,
+        *,
+        avoid_archives: Iterable[str] | None = None,
+        force_archive: str | None = None,
+    ) -> tuple[str, tuple[int, int]] | None:
+        """Choose the next ``(archive, year_bucket)`` to query.
+
+        ``avoid_archives`` excludes archives from the rotation (e.g. a
+        Monitor-driven intervention blacklisting one that's mostly
+        failing). ``force_archive`` pins the archive if the caller wants
+        to steer toward a specific underrepresented kind (still picks
+        the least-covered year bucket inside).
+        """
+        avoid = set(avoid_archives or ())
+        if force_archive and force_archive in self.archives and force_archive not in avoid:
+            year_bucket = self._next_year_bucket(state, force_archive)
+            return force_archive, year_bucket
         counts = state.archive_counts()
         candidates = [
             a
             for a in self.archives
-            if self.archive_quota is None or counts.get(a, 0) < self.archive_quota
+            if a not in avoid
+            and (self.archive_quota is None or counts.get(a, 0) < self.archive_quota)
         ]
         if not candidates:
             return None
