@@ -28,11 +28,59 @@ PyMuPDF page-pixel space.
 - `latexmk`, `biber`, `python3-pygments`, `inkscape`, `gnuplot`, `graphviz`,
   `librsvg2-bin`, `pdf2svg`, `fonts-noto`, `fonts-noto-cjk` — the classic
   arXiv-friendly set.
-- Python 3.10+ with `pymupdf` and `Pillow`:
+- Python 3.10+. Install the Python deps:
 
   ```bash
-  pip install pymupdf pillow
+  pip install pymupdf pillow feedparser pandas pyarrow
   ```
+
+## Quick start (cluster / codex agent)
+
+One-shot setup on a fresh Linux box (`texlive-full` already installed):
+
+```bash
+git clone https://github.com/HansBug/arxiv-paper-layout-dataset.git
+cd arxiv-paper-layout-dataset
+pip install -r <(printf 'pymupdf\npillow\nfeedparser\npandas\npyarrow\npytest\n')
+
+# Run the continuous crawler. Writes state / workspaces under runs/corpus/.
+# Safe to Ctrl-C and re-launch -- state.json is the source of truth.
+nohup python3 -u scripts/run_corpus_pipeline.py \
+  --root runs/corpus \
+  --max-papers 100000 \
+  --max-images 1000000 \
+  --candidates-per-query 25 \
+  --archive-quota 10000 \
+  --dashboard-every 5 \
+  > runs/corpus/driver.log 2>&1 &
+
+# Watch progress at any time without touching the driver:
+python3 scripts/corpus_stats.py --state runs/corpus/state.json --top 20
+tail -f runs/corpus/driver.log
+
+# Any time -- or at the end -- turn the corpus into a YOLO dataset:
+python3 scripts/export_yolo.py \
+  --input runs/corpus/workspaces \
+  --out   runs/corpus/yolo \
+  --split 8:1:1 \
+  --format jpg \
+  --max-short-side 720
+# dataset/data.yaml ready for Ultralytics ``yolo train data=... model=yolov8s.pt``
+```
+
+Skip-the-queue mode (you only want the small 51-paper seed corpus rather
+than crawling fresh arXiv):
+
+```bash
+# These directories come from the texlive-arxiv-validation runs; the repo
+# ships the pipeline outputs under runs/v2_validated/ and runs/v2_extra/.
+python3 scripts/build_dataset.py                                       # 20 papers
+python3 scripts/fetch_test_papers.py && \
+python3 scripts/build_dataset.py --source-root runs/test_papers_src \
+                                  --work-root runs/v2_extra            # 32 papers
+python3 scripts/export_yolo.py --input runs/v2_validated runs/v2_extra \
+                               --out   runs/yolo_seed
+```
 
 ## Inputs
 
@@ -178,30 +226,88 @@ python3 scripts/fetch_arxiv_catalog.py \
 Rate-limited at 3s between requests per arXiv's stated policy; budget
 ~15 min for the full 20-archive run at `--per-archive 500`.
 
+## Continuous corpus pipeline
+
+`scripts/run_corpus_pipeline.py` glues arxiv fetch + pipeline +
+statistics into a single crash-safe crawler. On every iteration it:
+
+1. Reads `state.json` and computes the per-archive success counts.
+2. Picks the least-covered archive (tie-broken randomly) and, within
+   it, the least-covered year bucket so the crawl spreads across time.
+3. Queries the arXiv export API for candidates in that bucket that
+   aren't already in `state.json`.
+4. Downloads the e-print, extracts, runs `process_paper`, records
+   per-paper stats (pages, label counts, per-page box histogram).
+5. Writes `state.json` atomically (tmp + rename) so SIGINT / OOM /
+   preemption never corrupts the corpus.
+6. Prints a live dashboard (same blob is persisted in the `stats`
+   field of `state.json`).
+
+Flags of interest:
+
+| flag                      | default                | meaning                                              |
+|---------------------------|------------------------|------------------------------------------------------|
+| `--root`                  | `runs/corpus`          | where state, sources/, workspaces/ live              |
+| `--max-papers`            | unlimited              | stop when `papers_ok` hits this                      |
+| `--max-images`            | unlimited              | stop when `pages_with_labels` hits this              |
+| `--archive-quota`         | unlimited              | cap per-archive successful papers                    |
+| `--candidates-per-query`  | 15                     | number of arxiv hits to consider per API call        |
+| `--dashboard-every`       | 1                      | print the dashboard every N papers                   |
+| `--keep-workspace`        | off                    | keep raw source + compile intermediates (debug only) |
+
+Disk footprint: after a successful paper, the pipeline keeps only
+`<paper>/pages/*.png` (200 DPI PNGs) + `<paper>/dataset/annotations.json`
++ `<paper>/qc/page_NNN.png`. `src/` (raw source + compile products) and
+`downloads/` are deleted. A typical paper weighs ~5-30 MB this way.
+
+Resume: just relaunch the same command. Already-logged papers (OK or
+failed) are skipped, the scheduler continues filling under-represented
+archives.
+
+Monitor without interrupting:
+
+```bash
+python3 scripts/corpus_stats.py --state runs/corpus/state.json --top 20
+```
+
+prints archive / year / primary-category / kind / boxes-per-page
+histograms plus the top failure reasons (compile timeouts, absent
+zref anchors, download errors, etc).
+
 ## Export to Ultralytics YOLO format
 
-`scripts/export_yolo.py` turns the pipeline outputs under
-`runs/v2_validated/` + `runs/v2_extra/` into a ready-to-train
-Ultralytics YOLO dataset. The default 8:1:1 split is **deterministic**:
-the sample's filename stem embeds both `arxiv_id` and `page_id`, and
-its split is picked by `sha256(stem) % 10` → 0-7 train / 8 val / 9 test.
-Same stem always lands in the same split, even across re-runs.
+`scripts/export_yolo.py` turns any pipeline output tree(s) -- the
+seed `runs/v2_validated/` + `runs/v2_extra/` or the live
+`runs/corpus/workspaces/` -- into a ready-to-train Ultralytics YOLO
+dataset. Images are converted to **JPG with short-side <= 720 pt**
+by default so the dataset can ship to a remote training host; use
+`--format png` or `--max-short-side 0` to override.
+
+The default 8:1:1 split is **deterministic**: the sample's filename
+stem embeds both `arxiv_id` and `page_id`, and its split is picked
+by `sha256(stem) % 10` → 0-7 train / 8 val / 9 test. Same stem always
+lands in the same split, even across re-runs or on a different host.
 
 ```bash
 python3 scripts/export_yolo.py \
-  --input runs/v2_validated runs/v2_extra \
-  --out   runs/yolo_dataset
-  # optional: --split 7:2:1 to override the ratio
-  # optional: --symlink for dev only (default copies images so the dataset
-  #                                   is portable to a remote training host)
+  --input runs/corpus/workspaces \
+  --out   runs/corpus/yolo
+
+  # optional:
+  #   --input runs/v2_validated runs/v2_extra   multiple source trees
+  #   --split 7:2:1                             override the ratio
+  #   --format png                              keep PNG
+  #   --max-short-side 0                        no resize
+  #   --jpg-quality 85                          cheaper JPEG
+  #   --symlink                                 dev only (same-format + no resize)
 ```
 
 Layout:
 
 ```
-runs/yolo_dataset/
+<out>/
   data.yaml                           # class names + split paths
-  images/{train,val,test}/<paper_id>__page_<NNN>.png
+  images/{train,val,test}/<paper_id>__page_<NNN>.jpg
   labels/{train,val,test}/<paper_id>__page_<NNN>.txt
 ```
 
@@ -213,6 +319,11 @@ Each `.txt` has one row per instance:
 
 Classes are listed in the order `fig / fig_cap / table / table_cap /
 algorithm / algorithm_cap / listing / listing_cap`.
+
+By default images are **copied** (not symlinked) so the dataset ships
+cleanly to a remote training host that doesn't have the pipeline's
+source tree; `--symlink` is a dev-only opt-in and only works when the
+format matches and `--max-short-side 0`.
 
 ## Known limitations
 

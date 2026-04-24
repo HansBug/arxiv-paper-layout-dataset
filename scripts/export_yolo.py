@@ -7,17 +7,24 @@ The YOLO layout this produces::
     <out>/
       data.yaml                  -- class names, split paths
       images/
-        train/<paper_id>__page_<NNN>.png
-        val/<paper_id>__page_<NNN>.png
-        test/<paper_id>__page_<NNN>.png
+        train/<paper_id>__page_<NNN>.jpg   (default: JPG, short-side <= 720)
+        val/...
+        test/...
       labels/
         train/<paper_id>__page_<NNN>.txt
-        val/<paper_id>__page_<NNN>.txt
-        test/<paper_id>__page_<NNN>.txt
+        val/...
+        test/...
 
 Label files are plain YOLO: one row per instance, each row is::
 
     <class_index> <cx_norm> <cy_norm> <w_norm> <h_norm>
+
+Image processing:
+- Default output format: JPG (``--format jpg``; ``--format png`` keeps PNG).
+- Default resize policy: if ``min(width, height) > 720``, scale so the
+  shorter side equals 720. Override with ``--max-short-side``; use 0 to
+  disable resizing. Boxes are re-normalised automatically because YOLO
+  labels are already relative to the (possibly-resized) image size.
 
 Split determinism:
 - The file name contains both the arxiv paper id and the page number, so
@@ -41,6 +48,8 @@ import json
 import shutil
 import sys
 from pathlib import Path
+
+from PIL import Image
 
 
 CLASSES: tuple[str, ...] = (
@@ -131,17 +140,47 @@ def iter_papers(input_root: Path):
         yield entry.name, ann, pages_dir
 
 
+def _write_image(
+    src: Path,
+    dst: Path,
+    fmt: str,
+    max_short_side: int,
+    jpg_quality: int,
+) -> None:
+    """Save ``src`` into ``dst`` in ``fmt`` format, optionally resized so the
+    shorter side is at most ``max_short_side`` (use 0 to disable).
+    """
+    with Image.open(src) as im:
+        w, h = im.size
+        short = min(w, h)
+        if max_short_side > 0 and short > max_short_side:
+            scale = max_short_side / float(short)
+            new_size = (int(round(w * scale)), int(round(h * scale)))
+            im = im.resize(new_size, Image.LANCZOS)
+        if fmt == "jpg":
+            im = im.convert("RGB")
+            im.save(dst, format="JPEG", quality=jpg_quality, optimize=True)
+        elif fmt == "png":
+            im.save(dst, format="PNG", optimize=True)
+        else:
+            raise ValueError(f"unsupported format {fmt!r}")
+
+
 def export(
     inputs: list[Path],
     out: Path,
     weights: tuple[int, int, int],
     copy_images: bool = True,
+    image_format: str = "jpg",
+    max_short_side: int = 720,
+    jpg_quality: int = 90,
 ) -> dict[str, int]:
     out.mkdir(parents=True, exist_ok=True)
     for subset in ("train", "val", "test"):
         (out / "images" / subset).mkdir(parents=True, exist_ok=True)
         (out / "labels" / subset).mkdir(parents=True, exist_ok=True)
 
+    ext = f".{image_format}"
     counts: dict[str, int] = {"train": 0, "val": 0, "test": 0, "skipped_no_labels": 0}
 
     for input_root in inputs:
@@ -165,14 +204,23 @@ def export(
                     counts["skipped_no_labels"] += 1
                     continue
 
-                dst_img = out / "images" / split / f"{stem}.png"
+                dst_img = out / "images" / split / f"{stem}{ext}"
                 dst_lbl = out / "labels" / split / f"{stem}.txt"
-                if copy_images:
-                    shutil.copyfile(src_img, dst_img)
-                else:
+                # Symlink only makes sense when src and dst share the exact
+                # same byte content: we can't symlink across format + resize.
+                can_symlink = (
+                    (not copy_images)
+                    and image_format == src_img.suffix.lstrip(".").lower()
+                    and max_short_side <= 0
+                )
+                if can_symlink:
                     if dst_img.exists() or dst_img.is_symlink():
                         dst_img.unlink()
                     dst_img.symlink_to(src_img.resolve())
+                else:
+                    _write_image(
+                        src_img, dst_img, image_format, max_short_side, jpg_quality
+                    )
                 dst_lbl.write_text("\n".join(rows) + "\n", encoding="utf-8")
                 counts[split] += 1
 
@@ -227,7 +275,26 @@ def main() -> int:
         "--symlink",
         action="store_true",
         help="symlink images instead of copying (saves disk; only usable if the "
-        "source tree persists)",
+        "source tree persists AND format matches AND no resize).",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("jpg", "png"),
+        default="jpg",
+        help="output image format; default jpg for a compact shippable dataset",
+    )
+    parser.add_argument(
+        "--max-short-side",
+        type=int,
+        default=720,
+        help="downscale images so min(width, height) == this value when the "
+        "source image is larger; 0 disables resizing (default 720)",
+    )
+    parser.add_argument(
+        "--jpg-quality",
+        type=int,
+        default=90,
+        help="JPEG quality when --format jpg (default 90)",
     )
     args = parser.parse_args()
 
@@ -236,6 +303,9 @@ def main() -> int:
         out=args.out.resolve(),
         weights=args.split,
         copy_images=not args.symlink,
+        image_format=args.format,
+        max_short_side=args.max_short_side,
+        jpg_quality=args.jpg_quality,
     )
     print(
         f"[done] {sum(v for k, v in counts.items() if k != 'skipped_no_labels')} images "

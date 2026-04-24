@@ -19,3 +19,4 @@ __pycache__/
 *.synctex.gz
 runs/yolo_dataset/
 runs/arxiv_catalog*.parquet
+runs/corpus/
