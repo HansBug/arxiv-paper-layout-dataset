@@ -51,6 +51,22 @@ PREAMBLE_INJECTION = r"""
   \typeout{ARXIVLAYOUT-MARK id=#1 hsize=\the\hsize\space linewidth=\the\linewidth\space columnwidth=\the\columnwidth}%
 }
 
+% Force-left variant used around lstlistings inside a \centering float.
+% \par ends the currently-open paragraph, then we locally zero the skip
+% registers that \centering sets to fill, so the new paragraph's single
+% (whatsit-only) line places the zsavepos at x=leftmargin rather than at
+% the line's centred midpoint. Required for codex Figure 3 and any other
+% ``\centering + lstlisting`` combo -- without it the listing bbox slides
+% halfway into the column's right half.
+\newcommand{\alxmarkleft}[1]{%
+  \par
+  \begingroup
+    \leftskip=\z@\rightskip=\z@\parfillskip=\z@\@plus 1fil\relax
+    \parindent=\z@
+    \leavevmode\alxmark{#1}\par
+  \endgroup
+}
+
 % Anchor-based 2-D bbox for a display block.
 %
 % Strategy: measure the natural width/height/depth of the payload in a box,
@@ -225,7 +241,20 @@ def _env_regex(envname: str) -> re.Pattern:
 
 
 _INCLUDE_GRAPHICS = re.compile(
-    r"\\includegraphics\*?(?:\s*\[[^\]]*\])?\s*\{[^{}]+\}",
+    r"\\(?:includegraphics)\*?(?:\s*\[[^\]]*\])?\s*\{[^{}]+\}",
+    re.DOTALL,
+)
+
+# Animated-image macros like \animategraphics take 3 mandatory args:
+# frame-rate, path-prefix, start-frame, end-frame (2 or 3 args in different
+# flavors). We match the common 4-arg form used by the animate package.
+_ANIMATE_GRAPHICS = re.compile(
+    r"\\animategraphics\*?"
+    r"(?:\s*\[[^\]]*\])?"   # optional options
+    r"(?:\s*\{[^{}]+\})"    # frame rate
+    r"(?:\s*\{[^{}]+\})"    # path prefix
+    r"(?:\s*\{[^{}]+\})"    # start frame
+    r"(?:\s*\{[^{}]+\})",   # end frame
     re.DOTALL,
 )
 
@@ -240,6 +269,49 @@ _TIKZPICTURE = re.compile(
     r".*?\\end\{tikzpicture\}",
     re.DOTALL,
 )
+
+
+_INPUT_RE = re.compile(r"\\(?:input|include|subfile)\s*\{([^{}]+)\}")
+
+
+def _resolve_input_path(name: str, curr_dir: Path, root: Path) -> Path | None:
+    candidate_names = [name]
+    if not name.endswith(".tex"):
+        candidate_names.append(name + ".tex")
+    for n in candidate_names:
+        for base in (curr_dir, root):
+            candidate = (base / n).resolve()
+            try:
+                if candidate.is_file() and str(candidate).startswith(str(root.resolve())):
+                    return candidate
+            except OSError:
+                continue
+    return None
+
+
+def _expand_inputs(text: str, curr_dir: Path, root: Path, depth: int = 0) -> str:
+    """Inline ``\\input`` / ``\\include`` / ``\\subfile`` recursively, up to
+    a bounded depth (sanity guard against mutually-referencing files).
+    """
+    if depth >= 20:
+        return text
+
+    def replace(match: re.Match) -> str:
+        # skip matches inside a % comment
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_so_far = text[line_start: match.start()]
+        if "%" in line_so_far and not line_so_far.rstrip().endswith("\\%"):
+            return match.group(0)
+        path = _resolve_input_path(match.group(1).strip(), curr_dir, root)
+        if path is None:
+            return match.group(0)
+        try:
+            inner = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return match.group(0)
+        return "\n" + _expand_inputs(inner, path.parent, root, depth + 1) + "\n"
+
+    return _INPUT_RE.sub(replace, text)
 
 
 def _strip_nested_floats(body: str) -> str:
@@ -385,6 +457,9 @@ class LatexBBoxInjector:
         tex = self._inject_floats(tex, env="algorithm", kind_body="algorithm")
         tex = self._inject_floats(tex, env="algorithm2e", kind_body="algorithm")
         tex = self._inject_floats(tex, env="listing", kind_body="listing")
+        # longtable is an inline table env (no enclosing \begin{table}); treat
+        # as its own float so we still emit a table / table_cap.
+        tex = self._inject_longtables(tex)
         tex = self._inject_standalone_lstlisting(tex)
         tex = self._inject_preamble(tex)
         return tex
@@ -464,7 +539,15 @@ class LatexBBoxInjector:
                 if trial == body:
                     trial = self._wrap_tikzpictures(body, kind_body, float_id)
                 wrapped = trial != body
-                new_body = trial
+                # LLaVA qualitative appendix etc use tcolorbox + lstlisting
+                # with no \includegraphics/tikzpicture. If the figure has a
+                # caption we still want a fig body -- fall back to a span
+                # from the figure's inner-top to just-before the caption.
+                if not wrapped and has_caption:
+                    new_body = self._wrap_fig_span(trial, kind_body, float_id)
+                    wrapped = True
+                else:
+                    new_body = trial
             elif env == "table":
                 trial = self._wrap_tabulars(body, kind_body, float_id)
                 wrapped = trial != body
@@ -537,11 +620,10 @@ class LatexBBoxInjector:
                 f"\\makeatletter\\gdef\\alx@current@alg@id{{{cap_id}}}\\makeatother%\n"
             )
             # After each instrumented float we reset \alx@current@alg@id to a
-            # neutral sentinel. Otherwise a stale value from the previous
-            # float survives and gets reused by LaTeX internals (e.g.
-            # \float@makebox fired for a different deferred block on a
-            # later page, clobbering the anchor coords of the last float
-            # whose id we actually cared about).
+            # neutral sentinel. Trailing `%` (not `%\n`) so the leading \n
+            # of whatever followed `\end{env}` in the original source gets
+            # absorbed by the comment rather than creating a fresh paragraph
+            # break inside a minipage stretch.
             reset_id = self._next_id(f"{env}_done")
             return (
                 preamble
@@ -552,7 +634,7 @@ class LatexBBoxInjector:
                 f"\n\\alxmark{{{inner_bot}}}%\n"
                 f"{end}%\n"
                 f"\\alxmark{{{outer_bot}}}%\n"
-                f"\\makeatletter\\gdef\\alx@current@alg@id{{{reset_id}}}\\makeatother%\n"
+                f"\\makeatletter\\gdef\\alx@current@alg@id{{{reset_id}}}\\makeatother%"
             )
 
         return pattern.sub(sub, tex)
@@ -623,6 +705,12 @@ class LatexBBoxInjector:
                 )
             )
             reset_id = self._next_id(f"{env}_done")
+            # Trailing `%` (no \n) so the leading \n of whatever comes after
+            # the closing \end{minipage} in the *original* source gets eaten
+            # as part of the comment. Otherwise \makeatother% + [body's
+            # leading \n] + empty line = a stray \par that breaks the
+            # side-by-side minipage layout (cs page 11 staggered into
+            # stacked tables before this fix).
             out_parts.append(
                 preamble
                 + f"\\alxmark{{{outer_top}}}%\n"
@@ -632,7 +720,7 @@ class LatexBBoxInjector:
                 + f"\n\\alxmark{{{inner_bot}}}%\n"
                 + "\\end{minipage}%\n"
                 + f"\\alxmark{{{outer_bot}}}%\n"
-                + f"\\makeatletter\\gdef\\alx@current@alg@id{{{reset_id}}}\\makeatother%\n"
+                + f"\\makeatletter\\gdef\\alx@current@alg@id{{{reset_id}}}\\makeatother%"
             )
             cursor = mp_end
         out_parts.append(body[cursor:])
@@ -653,7 +741,54 @@ class LatexBBoxInjector:
             )
             return f"\\alxwrap{{{label_id}}}{{{inner}}}"
 
-        return _INCLUDE_GRAPHICS.sub(sub, body)
+        # Wrap both \includegraphics and \animategraphics. If the same
+        # figure defines both via \IfDefinedSwitch{...}{animate}{include},
+        # the conditional picks one branch and only that branch's alxwrap
+        # fires -- which is fine, we only need one body anchor per figure.
+        body = _INCLUDE_GRAPHICS.sub(sub, body)
+        body = _ANIMATE_GRAPHICS.sub(sub, body)
+        return body
+
+    def _wrap_fig_span(self, body: str, kind: str, float_id: str) -> str:
+        """Fallback body wrap for figures that have no ``\\includegraphics``
+        or standalone ``tikzpicture`` (e.g. LLaVA's tcolorbox + lstlisting
+        proof examples). We emit a span pair bracketing everything in the
+        figure body except the ``\\caption{…}`` call; ``@makecaption``
+        already records the caption's own top/bot so the cap bbox stays
+        precise on the caption side.
+        """
+        label_id = self._next_id(kind)
+        top = f"{label_id}-top"
+        bot = f"{label_id}-bot"
+        self.manifest.labels.append(
+            LabeledAnchor(
+                label_id=label_id,
+                kind=kind,
+                float_id=float_id,
+                anchor_names=[top, bot],
+                method="span",
+            )
+        )
+        caption_end = _find_caption_span(body)
+        if caption_end is None:
+            return f"\n\\alxmark{{{top}}}%\n{body}\n\\alxmark{{{bot}}}%\n"
+        cap_start, cap_end = caption_end
+        pre = body[:cap_start].strip()
+        post = body[cap_end:].strip()
+        if len(pre) < len(post):
+            # caption near top: body is after caption
+            return (
+                body[:cap_end]
+                + f"\n\\alxmark{{{top}}}%\n"
+                + body[cap_end:]
+                + f"\n\\alxmark{{{bot}}}%\n"
+            )
+        return (
+            f"\n\\alxmark{{{top}}}%\n"
+            + body[:cap_start]
+            + f"\n\\alxmark{{{bot}}}%\n"
+            + body[cap_start:]
+        )
 
     def _wrap_tikzpictures(self, body: str, kind: str, float_id: str) -> str:
         def sub(match: re.Match) -> str:
@@ -784,6 +919,100 @@ class LatexBBoxInjector:
             + body[cap_start:]
         )
 
+    def _inject_longtables(self, tex: str) -> str:
+        """``longtable`` is a pageable alternative to ``\\begin{table}``.
+        Treat each ``\\begin{longtable}...\\end{longtable}`` as a standalone
+        table float: emit a body bbox around the tabular-like content and a
+        cap bbox spanning the whole block (captions inside longtable use
+        ``\\caption`` too, so our ``\\@makecaption`` hook extends the cap
+        across multi-page spans naturally).
+        """
+        pattern = re.compile(
+            r"(\\begin\{longtable\*?\}"
+            r"(?:\s*\[[^\]]*\])?"      # optional [width] argument
+            r"(?:\s*\{(?:[^{}]|\{[^{}]*\})*\})?"   # optional {column spec}
+            r")"
+            r"(.*?)"
+            r"(\\end\{longtable\*?\})",
+            re.DOTALL,
+        )
+
+        def sub(match: re.Match) -> str:
+            begin = match.group(1)
+            body = match.group(2)
+            end = match.group(3)
+            float_id = self._next_id("longtable_float")
+            cap_id = self._next_id("table_cap")
+            body_id = self._next_id("table")
+
+            outer_top = f"{cap_id}-outer-top"
+            outer_bot = f"{cap_id}-outer-bot"
+            inner_top = f"{cap_id}-inner-top"
+            inner_bot = f"{cap_id}-inner-bot"
+            body_top = f"{body_id}-top"
+            body_bot = f"{body_id}-bot"
+
+            self.manifest.labels.append(
+                LabeledAnchor(
+                    label_id=cap_id,
+                    kind="table_cap",
+                    float_id=float_id,
+                    anchor_names=[inner_top, inner_bot, outer_top, outer_bot],
+                    method="span",
+                )
+            )
+            # for the body we use a span pair around the tabular content
+            # (everything in the longtable body excluding its caption).
+            self.manifest.labels.append(
+                LabeledAnchor(
+                    label_id=body_id,
+                    kind="table",
+                    float_id=float_id,
+                    anchor_names=[body_top, body_bot],
+                    method="span",
+                )
+            )
+
+            # find the first caption (if any) to help place body markers so
+            # the body excludes the caption region
+            caption_end = _find_caption_span(body)
+            if caption_end is None:
+                new_body = (
+                    f"\n\\alxmark{{{body_top}}}%\n{body}\n\\alxmark{{{body_bot}}}%\n"
+                )
+            else:
+                cap_start, cap_end = caption_end
+                pre = body[:cap_start].strip()
+                post = body[cap_end:].strip()
+                if len(pre) < len(post):
+                    new_body = (
+                        body[:cap_end]
+                        + f"\n\\alxmark{{{body_top}}}%\n"
+                        + body[cap_end:]
+                        + f"\n\\alxmark{{{body_bot}}}%\n"
+                    )
+                else:
+                    new_body = (
+                        f"\n\\alxmark{{{body_top}}}%\n"
+                        + body[:cap_start]
+                        + f"\n\\alxmark{{{body_bot}}}%\n"
+                        + body[cap_start:]
+                    )
+            reset_id = self._next_id("longtable_done")
+            return (
+                f"\\makeatletter\\gdef\\alx@current@alg@id{{{cap_id}}}\\makeatother%\n"
+                f"\\alxmark{{{outer_top}}}%\n"
+                f"{begin}%\n"
+                f"\\alxmark{{{inner_top}}}%\n"
+                f"{new_body}"
+                f"\\alxmark{{{inner_bot}}}%\n"
+                f"{end}%\n"
+                f"\\alxmark{{{outer_bot}}}%\n"
+                f"\\makeatletter\\gdef\\alx@current@alg@id{{{reset_id}}}\\makeatother%\n"
+            )
+
+        return pattern.sub(sub, tex)
+
     def _inject_standalone_lstlisting(self, tex: str) -> str:
         """lstlisting / minted outside of a ``listing`` float. These get no
         ``_cap`` label."""
@@ -819,17 +1048,15 @@ class LatexBBoxInjector:
                         method="span",
                     )
                 )
-                # Force a paragraph break before the top mark so it lands in
-                # v-mode at the upcoming column's left edge, not at the
-                # *current* x-position of whatever inline text preceded the
-                # \begin{lstlisting} (e.g. ``\textbf{Formal-to-formal:}``
-                # immediately before the lstlisting in LLaVA's qualitative
-                # appendix). Without the \par, the mark records an x in the
-                # middle of that bold text and the bbox slides off the
-                # listing's actual left edge.
+                # Use \alxmarkleft (force-left variant). Regular \alxmark
+                # inside a \centering block would record an x in the
+                # centred midpoint of the line. \alxmarkleft locally
+                # zeroes the skip registers \centering sets so the mark
+                # lands at the column's actual left edge -- matching the
+                # lstlisting's natural rendering.
                 return (
-                    f"\\par\\noindent\\alxmark{{{top}}}%\n{match.group(0)}"
-                    f"\n\\par\\noindent\\alxmark{{{bot}}}%"
+                    f"\\alxmarkleft{{{top}}}%\n{match.group(0)}"
+                    f"\n\\alxmarkleft{{{bot}}}%"
                 )
 
             return pattern.sub(sub, tex)
@@ -866,25 +1093,38 @@ class MultiFileInjector:
         return self.injector.manifest
 
     def inject_tree(self, src_root: Path, exts: tuple[str, ...] = (".tex",)) -> list[Path]:
-        # Two-pass: rewrite every fragment first (so one shared injector
-        # counter assigns sequential ids across the whole tree), then
-        # prepend the preamble into the file that owns \begin{document}.
+        """Inject the whole source tree.
+
+        Strategy: inline-resolve every ``\\input``/``\\include`` into the
+        main document so we can process a fully flattened text in one go.
+        Otherwise tabulars / includegraphics that live in a fragment file
+        (grqc's ``pe_priors.tex``, astro's ``log_evidence.tex``) don't
+        appear inside the parent ``\\begin{table}`` env's body string,
+        and our regex never gets a chance to wrap them.
+
+        The main file is rewritten with the fully-inlined + injected
+        content. Fragment files are left alone -- they won't be \\input-ed
+        anymore so their contents don't matter. Any fragment that still
+        happens to carry a float (rare) still gets scanned.
+        """
         paths = [p for p in src_root.rglob("*") if p.is_file() and p.suffix in exts]
-        # stable ordering: main-doc first, then everything else by path
-        paths.sort(key=lambda p: (not self._has_begin_document(p), p.as_posix()))
-        modified: list[Path] = []
-        for path in paths:
+        main_path = None
+        for p in paths:
             try:
-                text = path.read_text(encoding="utf-8", errors="ignore")
+                if "\\begin{document}" in p.read_text(encoding="utf-8", errors="ignore"):
+                    main_path = p
+                    break
             except OSError:
                 continue
-            new = self._inject_floats_only(text)
-            if "\\begin{document}" in new:
-                new = self.injector._inject_preamble(new)
-            if new != text:
-                path.write_text(new, encoding="utf-8")
-                modified.append(path)
-        return modified
+        if main_path is None:
+            return []
+
+        main_text = main_path.read_text(encoding="utf-8", errors="ignore")
+        expanded = _expand_inputs(main_text, main_path.parent, src_root)
+        injected = self.injector.inject(expanded)
+        if injected != main_text:
+            main_path.write_text(injected, encoding="utf-8")
+        return [main_path]
 
     def _has_begin_document(self, path: Path) -> bool:
         try:

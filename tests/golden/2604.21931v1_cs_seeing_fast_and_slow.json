@@ -8,18 +8,29 @@
   "num_pages": 21,
   "labels": [
     {
+      "label_id": "fig_2",
+      "kind": "fig",
+      "page": 2,
+      "bbox": [
+        197,
+        214,
+        1306,
+        640
+      ]
+    },
+    {
       "label_id": "fig_cap_1",
       "kind": "fig_cap",
       "page": 2,
       "bbox": [
         197,
-        217,
+        214,
         1311,
-        842
+        844
       ]
     },
     {
-      "label_id": "fig_2",
+      "label_id": "fig_3",
       "kind": "fig",
       "page": 3,
       "bbox": [
@@ -85,7 +96,7 @@
       ]
     },
     {
-      "label_id": "fig_4",
+      "label_id": "fig_5",
       "kind": "fig",
       "page": 7,
       "bbox": [
@@ -107,7 +118,7 @@
       ]
     },
     {
-      "label_id": "fig_5",
+      "label_id": "fig_6",
       "kind": "fig",
       "page": 8,
       "bbox": [
@@ -173,7 +184,7 @@
       ]
     },
     {
-      "label_id": "fig_6",
+      "label_id": "fig_7",
       "kind": "fig",
       "page": 10,
       "bbox": [
@@ -197,10 +208,10 @@
     {
       "label_id": "table_5",
       "kind": "table",
-      "page": 11,
+      "page": 10,
       "bbox": [
-        653,
-        216,
+        314,
+        846,
         393,
         153
       ]
@@ -208,10 +219,10 @@
     {
       "label_id": "table_6",
       "kind": "table",
-      "page": 11,
+      "page": 10,
       "bbox": [
         969,
-        552,
+        846,
         441,
         123
       ]
@@ -219,10 +230,10 @@
     {
       "label_id": "table_cap_5",
       "kind": "table_cap",
-      "page": 11,
+      "page": 10,
       "bbox": [
-        536,
-        216,
+        197,
+        846,
         629,
         333
       ]
@@ -230,10 +241,10 @@
     {
       "label_id": "table_cap_6",
       "kind": "table_cap",
-      "page": 11,
+      "page": 10,
       "bbox": [
         876,
-        552,
+        846,
         629,
         333
       ]
@@ -241,7 +252,7 @@
     {
       "label_id": "table_7",
       "kind": "table",
-      "page": 12,
+      "page": 11,
       "bbox": [
         208,
         216,
@@ -252,10 +263,10 @@
     {
       "label_id": "table_8",
       "kind": "table",
-      "page": 12,
+      "page": 11,
       "bbox": [
         879,
-        626,
+        216,
         622,
         198
       ]
@@ -263,7 +274,7 @@
     {
       "label_id": "table_cap_7",
       "kind": "table_cap",
-      "page": 12,
+      "page": 11,
       "bbox": [
         197,
         216,
@@ -274,16 +285,16 @@
     {
       "label_id": "table_cap_8",
       "kind": "table_cap",
-      "page": 12,
+      "page": 11,
       "bbox": [
         876,
-        626,
+        216,
         629,
         408
       ]
     },
     {
-      "label_id": "fig_8",
+      "label_id": "fig_10",
       "kind": "fig",
       "page": 13,
       "bbox": [
@@ -305,7 +316,7 @@
       ]
     },
     {
-      "label_id": "fig_9",
+      "label_id": "fig_11",
       "kind": "fig",
       "page": 14,
       "bbox": [
@@ -327,7 +338,7 @@
       ]
     },
     {
-      "label_id": "fig_10",
+      "label_id": "fig_12",
       "kind": "fig",
       "page": 15,
       "bbox": [
@@ -371,7 +382,7 @@
       ]
     },
     {
-      "label_id": "fig_11",
+      "label_id": "fig_13",
       "kind": "fig",
       "page": 17,
       "bbox": [
@@ -382,7 +393,7 @@
       ]
     },
     {
-      "label_id": "fig_12",
+      "label_id": "fig_14",
       "kind": "fig",
       "page": 17,
       "bbox": [
@@ -393,7 +404,7 @@
       ]
     },
     {
-      "label_id": "fig_13",
+      "label_id": "fig_15",
       "kind": "fig",
       "page": 17,
       "bbox": [
@@ -404,7 +415,7 @@
       ]
     },
     {
-      "label_id": "fig_14",
+      "label_id": "fig_16",
       "kind": "fig",
       "page": 17,
       "bbox": [
@@ -437,7 +448,7 @@
       ]
     },
     {
-      "label_id": "fig_15",
+      "label_id": "fig_17",
       "kind": "fig",
       "page": 18,
       "bbox": [
@@ -459,7 +470,7 @@
       ]
     },
     {
-      "label_id": "fig_16",
+      "label_id": "fig_18",
       "kind": "fig",
       "page": 19,
       "bbox": [
@@ -481,7 +492,7 @@
       ]
     },
     {
-      "label_id": "fig_17",
+      "label_id": "fig_19",
       "kind": "fig",
       "page": 20,
       "bbox": [

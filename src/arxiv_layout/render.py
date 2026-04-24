@@ -110,8 +110,11 @@ def resolve_labels(
             )
         elif label.method == "span":
             # ``anchor_names`` is a flat list of (top, bot) pairs tried in
-            # order. Pick the first pair where both ends resolved and live on
-            # the same page -- that's the most precise source we have.
+            # order. Pick the first pair where both ends resolved -- they
+            # don't have to be on the same page (longtable spans multiple
+            # pages). When the top and bot pair disagrees on page, we emit
+            # one bbox per intermediate page, clipped to the text block's
+            # vertical range.
             if len(label.anchor_names) % 2 != 0:
                 continue
             chosen_top: Anchor | None = None
@@ -124,18 +127,11 @@ def resolve_labels(
                 b = anchors.get(bot_name)
                 if t is None or b is None:
                     continue
-                if t.abspage != b.abspage:
-                    continue
                 chosen_top = t
                 chosen_bot = b
                 chosen_top_name = top_name
                 break
             if chosen_top is None or chosen_bot is None:
-                continue
-
-            page = chosen_top.abspage
-            page_h = pdf_page_heights_pt.get(page)
-            if page_h is None:
                 continue
 
             # X-extent: use \the\hsize reported at the mark's location when
@@ -148,18 +144,37 @@ def resolve_labels(
             x0 = _pt_from_sp(chosen_top.posx_sp)
             x1 = x0 + hsize_pt
 
-            y_top = page_h - _pt_from_sp(chosen_top.posy_sp)
-            y_bot = page_h - _pt_from_sp(chosen_bot.posy_sp)
-            y0 = min(y_top, y_bot)
-            y1 = max(y_top, y_bot)
-            resolved.append(
-                ResolvedLabel(
-                    label_id=label.label_id,
-                    kind=label.kind,
-                    page=page,
-                    bbox_pt=BBox(x0=x0, y0=y0, x1=x1, y1=y1),
+            top_page = chosen_top.abspage
+            bot_page = chosen_bot.abspage
+            if top_page > bot_page:
+                top_page, bot_page = bot_page, top_page
+
+            for p in range(top_page, bot_page + 1):
+                page_h = pdf_page_heights_pt.get(p)
+                if page_h is None:
+                    continue
+                if p == chosen_top.abspage and p == chosen_bot.abspage:
+                    y_top = page_h - _pt_from_sp(chosen_top.posy_sp)
+                    y_bot = page_h - _pt_from_sp(chosen_bot.posy_sp)
+                    y0, y1 = min(y_top, y_bot), max(y_top, y_bot)
+                elif p == chosen_top.abspage:
+                    y0 = page_h - _pt_from_sp(chosen_top.posy_sp)
+                    y1 = page_h  # run to bottom of page
+                elif p == chosen_bot.abspage:
+                    y0 = 0.0
+                    y1 = page_h - _pt_from_sp(chosen_bot.posy_sp)
+                else:
+                    # intermediate page -- span the whole text block
+                    y0 = 0.0
+                    y1 = page_h
+                resolved.append(
+                    ResolvedLabel(
+                        label_id=label.label_id,
+                        kind=label.kind,
+                        page=p,
+                        bbox_pt=BBox(x0=x0, y0=y0, x1=x1, y1=y1),
+                    )
                 )
-            )
     return resolved
 
 

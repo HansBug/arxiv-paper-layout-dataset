@@ -2,6 +2,7 @@
   "categories": [
     "fig",
     "fig_cap",
+    "table",
     "table_cap"
   ],
   "num_pages": 21,
@@ -73,12 +74,23 @@
       ]
     },
     {
+      "label_id": "table_1",
+      "kind": "table",
+      "page": 8,
+      "bbox": [
+        150,
+        144,
+        1411,
+        493
+      ]
+    },
+    {
       "label_id": "table_cap_1",
       "kind": "table_cap",
       "page": 8,
       "bbox": [
         150,
-        145,
+        144,
         1417,
         680
       ]
@@ -128,14 +140,25 @@
       ]
     },
     {
+      "label_id": "table_2",
+      "kind": "table",
+      "page": 12,
+      "bbox": [
+        150,
+        144,
+        1411,
+        290
+      ]
+    },
+    {
       "label_id": "table_cap_2",
       "kind": "table_cap",
       "page": 12,
       "bbox": [
         150,
-        145,
+        144,
         1417,
-        505
+        506
       ]
     },
     {
