@@ -57,7 +57,7 @@ validator writes exactly this layout; you can point
 # 20 validated arXiv papers, default DPI 200
 python3 scripts/build_dataset.py \
   --source-root /path/to/validated-arxiv-runs \
-  --work-root   runs/v1
+  --work-root   runs/v2_validated
 
 # one paper only
 python3 scripts/build_dataset.py \
@@ -70,7 +70,7 @@ CLI flags:
 | flag             | default                                                                    | meaning                              |
 |------------------|----------------------------------------------------------------------------|--------------------------------------|
 | `--source-root`  | `/home/zhangshaoang/texlive-arxiv-validation/runs/full-20260424-132920`    | directory of `<paper>/src/...` trees |
-| `--work-root`    | `<repo>/runs/v1`                                                           | where outputs land                   |
+| `--work-root`    | `<repo>/runs/v2_validated`                                                           | where outputs land                   |
 | `--dpi`          | `200`                                                                      | rasterisation DPI                    |
 | `--limit N`      | —                                                                          | process first N papers only          |
 | `--papers a b …` | —                                                                          | only process named paper directories |
@@ -81,7 +81,7 @@ CLI flags:
 For every paper:
 
 ```
-runs/v1/<paper_id>/
+runs/v2_validated/<paper_id>/
   src/                   # injected TeX + all compile products
   pages/page_NNN.png     # clean page rasters
   qc/page_NNN.png        # same page with labelled bboxes overlaid
@@ -95,7 +95,7 @@ runs/v1/<paper_id>/
 pixels** at the chosen DPI. Each annotation has an extra `label_id`
 field (`fig_3`, `fig_cap_3`, `algorithm_1`, …) for debugging.
 
-`runs/v1/summary.json` aggregates per-paper success, page count, label
+`runs/v2_validated/summary.json` aggregates per-paper success, page count, label
 count and class breakdown.
 
 ## How it works (short version)
@@ -123,9 +123,9 @@ A longer write-up aimed at contributors / LLM agents lives in
 ## Testing
 
 Tests compare a fingerprint (sorted labels + integer-pixel bboxes) of
-every cached `runs/v1/<paper_id>/dataset/annotations.json` against the
+every cached `runs/v2_validated/<paper_id>/dataset/annotations.json` against the
 committed snapshot under `tests/golden/`. The pipeline itself takes
-minutes per paper, so tests never re-run it — populate `runs/v1/` first:
+minutes per paper, so tests never re-run it — populate `runs/v2_validated/` first:
 
 ```bash
 # one-time (takes a while)
@@ -155,8 +155,8 @@ pulled straight from arXiv via:
 python3 scripts/fetch_test_papers.py          # downloads into runs/test_papers_src
 python3 scripts/build_dataset.py \
   --source-root runs/test_papers_src \
-  --work-root   runs/v1_extra
-python3 scripts/regen_golden.py               # with ALX_RUNS_ROOT=runs/v1_extra
+  --work-root   runs/v2_validated_extra
+python3 scripts/regen_golden.py               # with ALX_RUNS_ROOT=runs/v2_validated_extra
 ```
 
 ## Known limitations

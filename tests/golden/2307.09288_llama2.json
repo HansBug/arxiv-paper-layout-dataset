@@ -24,7 +24,7 @@
       "page": 3,
       "bbox": [
         1009,
-        235,
+        198,
         437,
         437
       ]
@@ -36,8 +36,19 @@
       "bbox": [
         200,
         198,
-        1305,
-        826
+        718,
+        796
+      ]
+    },
+    {
+      "label_id": "fig_cap_2",
+      "kind": "fig_cap",
+      "page": 3,
+      "bbox": [
+        954,
+        198,
+        548,
+        789
       ]
     },
     {
@@ -52,7 +63,7 @@
       ]
     },
     {
-      "label_id": "fig_cap_2",
+      "label_id": "fig_cap_3",
       "kind": "fig_cap",
       "page": 4,
       "bbox": [
@@ -74,7 +85,7 @@
       ]
     },
     {
-      "label_id": "fig_cap_3",
+      "label_id": "fig_cap_4",
       "kind": "fig_cap",
       "page": 5,
       "bbox": [
@@ -118,7 +129,7 @@
       ]
     },
     {
-      "label_id": "fig_cap_4",
+      "label_id": "fig_cap_5",
       "kind": "fig_cap",
       "page": 6,
       "bbox": [

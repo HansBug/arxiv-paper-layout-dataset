@@ -24,7 +24,7 @@ def main() -> int:
     parser.add_argument(
         "--work-root",
         type=Path,
-        default=Path(__file__).resolve().parent.parent / "runs" / "v1",
+        default=Path(__file__).resolve().parent.parent / "runs" / "v2",
     )
     parser.add_argument("--dpi", type=int, default=200)
     parser.add_argument("--limit", type=int, default=None)

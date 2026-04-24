@@ -110,7 +110,7 @@ python scripts/regen_golden.py --papers <paper_id> ...
 
 - Source arXiv trees: `/home/zhangshaoang/texlive-arxiv-validation/runs/full-20260424-132920/<paper>/src/`
   (20 strictly-validated papers from the TeX Live validation run).
-- Build outputs: `runs/v1/<paper>/` — `src/` (injected tex), `pages/` (PDF
+- Build outputs: `runs/v2_validated/<paper>/` — `src/` (injected tex), `pages/` (PDF
   rasters), `qc/` (overlayed PNGs), `dataset/annotations.json`.
 - Sample QC covers: `samples/*.png` — stable representative pages per
   layout family; please keep this set up to date when you add new kinds.
@@ -123,5 +123,5 @@ python3 scripts/build_dataset.py \
   --papers 2604.21800v1_mathph_variance_geometry_codes --limit 1
 
 # Inspect bbox vs body containment
-python3 scripts/qc_check.py --workdir runs/v1
+python3 scripts/qc_check.py --workdir runs/v2_validated
 ```

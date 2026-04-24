@@ -242,33 +242,80 @@ _TIKZPICTURE = re.compile(
 )
 
 
-def _has_caption_call(body: str) -> bool:
-    """True if ``body`` calls ``\\caption{…}`` that belongs to its own
-    enclosing float (as opposed to a nested algorithm / listing / figure /
-    table whose caption we already instrument separately).
-
-    The detection is intentionally crude -- there's no LaTeX parser here,
-    but the arxiv papers we process don't typically nest captioned floats
-    inside each other except via the ``\\begin{xxx}...\\end{xxx}`` pattern.
-    We strip any fully-nested float body out first, then look for a
-    top-level ``\\caption``.
+def _strip_nested_floats(body: str) -> str:
+    """Remove the *body* of nested floats from ``body`` so detection of
+    top-level patterns (captions, minipages) doesn't get confused by what
+    happens inside an inner algorithm/listing/figure/table block.
     """
-    # drop commented lines
-    cleaned_lines = []
-    for line in body.splitlines():
-        if line.lstrip().startswith("%"):
-            continue
-        cleaned_lines.append(line)
-    cleaned = "\n".join(cleaned_lines)
-
-    # remove nested floats that carry their own caption
+    cleaned = body
     for env in ("figure", "table", "algorithm", "algorithm2e", "listing"):
         pattern = re.compile(
             r"\\begin\{" + env + r"\*?\}.*?\\end\{" + env + r"\*?\}",
             re.DOTALL,
         )
         cleaned = pattern.sub("", cleaned)
+    # also strip comment lines
+    cleaned = "\n".join(
+        line for line in cleaned.splitlines() if not line.lstrip().startswith("%")
+    )
+    return cleaned
 
+
+def _find_top_level_minipages_with_caption(body: str) -> list[tuple[int, int]]:
+    """Find every ``\\begin{minipage}...\\end{minipage}`` block in ``body``
+    that itself contains a top-level ``\\caption{…}``.
+
+    Returns a list of (start, end) source offsets in *body*. The minipages
+    are the ones we treat as sub-floats so a side-by-side
+    ``\\begin{table}{minipage}{minipage}\\end{table}`` pattern emits one
+    cap per minipage instead of one merged cap for the outer table.
+    """
+    out: list[tuple[int, int]] = []
+    pattern = re.compile(
+        r"\\begin\{minipage\}(?:\[[^\]]*\])?(?:\{[^{}]*\})?",
+        re.DOTALL,
+    )
+    end_pattern = re.compile(r"\\end\{minipage\}")
+    pos = 0
+    while True:
+        m = pattern.search(body, pos)
+        if m is None:
+            break
+        # find matching \end{minipage} via depth counting
+        depth = 1
+        scan = m.end()
+        while depth > 0:
+            next_begin = pattern.search(body, scan)
+            next_end = end_pattern.search(body, scan)
+            if next_end is None:
+                # malformed -- bail
+                return out
+            if next_begin is not None and next_begin.start() < next_end.start():
+                depth += 1
+                scan = next_begin.end()
+            else:
+                depth -= 1
+                scan = next_end.end()
+        inner = body[m.end(): scan - len("\\end{minipage}")]
+        inner_clean = _strip_nested_floats(inner)
+        # also strip any nested minipages from the inner so we don't double-count
+        inner_no_minipage = re.sub(
+            r"\\begin\{minipage\}.*?\\end\{minipage\}",
+            "",
+            inner_clean,
+            flags=re.DOTALL,
+        )
+        if re.search(r"(?<!\\)\\caption\b", inner_no_minipage):
+            out.append((m.start(), scan))
+        pos = scan
+    return out
+
+
+def _has_caption_call(body: str) -> bool:
+    """True if ``body`` calls ``\\caption{…}`` that belongs to its own
+    enclosing float.
+    """
+    cleaned = _strip_nested_floats(body)
     return re.search(r"(?<!\\)\\caption\b", cleaned) is not None
 
 
@@ -397,6 +444,19 @@ class LatexBBoxInjector:
             # a wrapper around some other instrumented float (DDPM's two
             # side-by-side algorithm-bearing minipages) and adding a cap
             # label would just mis-paint the whole wrapper red.
+            # Multi-cap subdivision: if a figure/table contains multiple
+            # top-level minipages and each carries its own \caption (cs page
+            # 10, llava table 4 left/right pattern), treat each minipage as
+            # a sub-float with its own cap_id. Otherwise the outer float
+            # would emit one cap merging both side-by-side panels.
+            if env in ("figure", "table"):
+                minipages = _find_top_level_minipages_with_caption(body)
+                if len(minipages) >= 2:
+                    new_body = self._wrap_multicap_minipages(
+                        body, env, kind_body, kind_cap, float_id, minipages
+                    )
+                    return f"{begin}%\n{new_body}{end}%\n"
+
             wrapped = False
             has_caption = _has_caption_call(body)
             if env == "figure":
@@ -496,6 +556,87 @@ class LatexBBoxInjector:
             )
 
         return pattern.sub(sub, tex)
+
+    def _wrap_multicap_minipages(
+        self,
+        body: str,
+        env: str,
+        kind_body: str,
+        kind_cap: str,
+        float_id: str,
+        minipages: list[tuple[int, int]],
+    ) -> str:
+        """For a float (figure/table) whose body contains multiple top-level
+        minipages each holding their own ``\\caption``, treat each minipage
+        as an independent sub-float -- one ``cap_id`` and one set of body
+        wraps per minipage. Result: cs page 10 emits ``table_cap_5`` and
+        ``table_cap_6`` for the two side-by-side tables instead of a single
+        ``table_cap_5`` covering both.
+        """
+        out_parts: list[str] = []
+        cursor = 0
+        for mp_start, mp_end in minipages:
+            # passthrough whatever's between the previous cursor and this
+            # minipage (e.g. \centering, whitespace, \hfill)
+            out_parts.append(body[cursor:mp_start])
+
+            # locate the inner of this minipage
+            inner_begin_match = re.match(
+                r"\\begin\{minipage\}(?:\[[^\]]*\])?(?:\{[^{}]*\})?",
+                body[mp_start:mp_end],
+            )
+            assert inner_begin_match is not None
+            mp_open_end = mp_start + inner_begin_match.end()
+            mp_inner_end = mp_end - len("\\end{minipage}")
+            mp_inner = body[mp_open_end:mp_inner_end]
+
+            cap_id = self._next_id(kind_cap)
+            # Each minipage gets its OWN sub-float id so the cap-vs-body
+            # union in render.py doesn't pull in the sibling minipage's
+            # body box and stretch the cap across both columns.
+            sub_float_id = self._next_id(f"{env}_minipage")
+            # wrap the atomic body (includegraphics / tikzpicture / tabular)
+            if env == "figure":
+                inner_wrapped = self._wrap_graphics(mp_inner, kind_body, sub_float_id)
+                if inner_wrapped == mp_inner:
+                    inner_wrapped = self._wrap_tikzpictures(mp_inner, kind_body, sub_float_id)
+            else:  # table
+                inner_wrapped = self._wrap_tabulars(mp_inner, kind_body, sub_float_id)
+
+            # rebuild the minipage with cap_id pinning + alxmark span
+            preamble = (
+                f"\\makeatletter\\gdef\\alx@current@alg@id{{{cap_id}}}\\makeatother%\n"
+            )
+            outer_top = f"{cap_id}-outer-top"
+            outer_bot = f"{cap_id}-outer-bot"
+            inner_top = f"{cap_id}-inner-top"
+            inner_bot = f"{cap_id}-inner-bot"
+            primary_top = f"alx@flt@top@{cap_id}"
+            primary_bot = f"alx@flt@bot@{cap_id}"
+            self.manifest.labels.append(
+                LabeledAnchor(
+                    label_id=cap_id,
+                    kind=kind_cap,
+                    float_id=sub_float_id,
+                    anchor_names=[primary_top, primary_bot, inner_top, inner_bot, outer_top, outer_bot],
+                    method="span",
+                )
+            )
+            reset_id = self._next_id(f"{env}_done")
+            out_parts.append(
+                preamble
+                + f"\\alxmark{{{outer_top}}}%\n"
+                + body[mp_start:mp_open_end] + "%\n"
+                + f"\\alxmark{{{inner_top}}}%\n"
+                + inner_wrapped
+                + f"\n\\alxmark{{{inner_bot}}}%\n"
+                + "\\end{minipage}%\n"
+                + f"\\alxmark{{{outer_bot}}}%\n"
+                + f"\\makeatletter\\gdef\\alx@current@alg@id{{{reset_id}}}\\makeatother%\n"
+            )
+            cursor = mp_end
+        out_parts.append(body[cursor:])
+        return "".join(out_parts)
 
     def _wrap_graphics(self, body: str, kind: str, float_id: str) -> str:
         def sub(match: re.Match) -> str:
@@ -678,8 +819,17 @@ class LatexBBoxInjector:
                         method="span",
                     )
                 )
+                # Force a paragraph break before the top mark so it lands in
+                # v-mode at the upcoming column's left edge, not at the
+                # *current* x-position of whatever inline text preceded the
+                # \begin{lstlisting} (e.g. ``\textbf{Formal-to-formal:}``
+                # immediately before the lstlisting in LLaVA's qualitative
+                # appendix). Without the \par, the mark records an x in the
+                # middle of that bold text and the bbox slides off the
+                # listing's actual left edge.
                 return (
-                    f"\\alxmark{{{top}}}%\n{match.group(0)}\n\\alxmark{{{bot}}}%"
+                    f"\\par\\noindent\\alxmark{{{top}}}%\n{match.group(0)}"
+                    f"\n\\par\\noindent\\alxmark{{{bot}}}%"
                 )
 
             return pattern.sub(sub, tex)
