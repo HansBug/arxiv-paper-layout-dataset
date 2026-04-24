@@ -56,6 +56,7 @@ import signal
 import sys
 import tarfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
@@ -118,13 +119,34 @@ def _load_control(root: Path) -> dict:
     return data
 
 
-def _arxiv_api_call(url: str, attempts: int = 3, timeout: int = 60) -> bytes:
+def _arxiv_api_call(url: str, attempts: int = 5, timeout: int = 60) -> bytes:
+    """Call the arXiv export API with 429-aware exponential backoff.
+
+    arXiv's listing API is aggressive about throttling bursty pollers
+    (especially right after a lot of metadata queries). Generic
+    ``time.sleep(2*(attempt+1))`` is too short — a 429 typically needs
+    30-120s of silence. Detect 429 explicitly and sleep 30s, 60s,
+    120s, 240s, 480s on successive retries. Other errors keep the
+    original short linear backoff.
+    """
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     last_exc: Exception | None = None
     for attempt in range(attempts):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.read()
+        except urllib.error.HTTPError as exc:
+            last_exc = exc
+            if exc.code == 429:
+                delay = 30 * (2 ** attempt)  # 30, 60, 120, 240, 480
+                print(
+                    f"  [rate-limit] 429 from arxiv; sleeping {delay}s "
+                    f"(attempt {attempt + 1}/{attempts})",
+                    flush=True,
+                )
+                time.sleep(delay)
+            else:
+                time.sleep(2 * (attempt + 1))
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             time.sleep(2 * (attempt + 1))
