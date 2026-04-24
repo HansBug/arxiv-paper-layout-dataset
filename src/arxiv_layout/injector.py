@@ -204,6 +204,13 @@ class LabeledAnchor:
     float_id: str | None     # eg figure_0 (None for freestanding listings)
     anchor_names: list[str]  # zref anchor names we read coordinates from
     method: str              # "wrap" (2D corners) or "span" (top/bot pair, x from textwidth)
+    # For envs whose rendered width is always the full textblock (longtable,
+    # multi-page spans), tell the resolver to ignore the top-mark's x and
+    # use page_info.text_left_pt / text_right_pt instead. The mark's x
+    # reported for e.g. a \begin{longtable} lands at the first cell's indent,
+    # not the table's actual left edge, so the bbox drops the leftmost
+    # column otherwise.
+    use_textblock_x: bool = False
 
     def as_dict(self) -> dict:
         return {
@@ -212,6 +219,7 @@ class LabeledAnchor:
             "float_id": self.float_id,
             "anchor_names": self.anchor_names,
             "method": self.method,
+            "use_textblock_x": self.use_textblock_x,
         }
 
 
@@ -959,6 +967,7 @@ class LatexBBoxInjector:
                     float_id=float_id,
                     anchor_names=[inner_top, inner_bot, outer_top, outer_bot],
                     method="span",
+                    use_textblock_x=True,
                 )
             )
             # for the body we use a span pair around the tabular content
@@ -970,6 +979,7 @@ class LatexBBoxInjector:
                     float_id=float_id,
                     anchor_names=[body_top, body_bot],
                     method="span",
+                    use_textblock_x=True,
                 )
             )
 

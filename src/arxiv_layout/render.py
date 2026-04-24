@@ -134,20 +134,29 @@ def resolve_labels(
             if chosen_top is None or chosen_bot is None:
                 continue
 
-            # X-extent: use \the\hsize reported at the mark's location when
-            # available; otherwise fall back to column geometry.
-            mark_info = marks.get(chosen_top_name) if chosen_top_name else None
-            if mark_info is not None and mark_info.hsize_sp > 0:
-                hsize_pt = mark_info.hsize_sp / SP_PER_PT
-            else:
-                hsize_pt = page_info.columnwidth_pt or page_info.textwidth_pt
-            x0 = _pt_from_sp(chosen_top.posx_sp)
-            x1 = x0 + hsize_pt
-
             top_page = chosen_top.abspage
             bot_page = chosen_bot.abspage
             if top_page > bot_page:
                 top_page, bot_page = bot_page, top_page
+
+            # X-extent: use \the\hsize reported at the mark's location when
+            # available; otherwise fall back to column geometry. For labels
+            # that flag themselves as full-textblock (longtable) or whose
+            # span crosses pages (any cross-page float), the mark's x
+            # doesn't describe the actual render -- the rendered object
+            # covers the full textblock -- so force text_left/text_right.
+            use_textblock = label.use_textblock_x or (top_page != bot_page)
+            if use_textblock:
+                x0 = page_info.text_left_pt
+                x1 = page_info.text_right_pt
+            else:
+                mark_info = marks.get(chosen_top_name) if chosen_top_name else None
+                if mark_info is not None and mark_info.hsize_sp > 0:
+                    hsize_pt = mark_info.hsize_sp / SP_PER_PT
+                else:
+                    hsize_pt = page_info.columnwidth_pt or page_info.textwidth_pt
+                x0 = _pt_from_sp(chosen_top.posx_sp)
+                x1 = x0 + hsize_pt
 
             # For multi-page spans we clip to the textblock vertical bounds
             # so the emitted bbox doesn't bleed into headers / page numbers
