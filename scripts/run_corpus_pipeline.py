@@ -494,9 +494,13 @@ class Driver:
             self.state.upsert(rec)
             self.state.save()
             tag = "OK" if rec.status == STATUS_OK else f"FAIL({rec.reason})"
+            kind_str = ", ".join(
+                f"{k}={v}" for k, v in sorted(rec.labels_by_kind.items())
+            ) or "-"
             print(
-                f"     {tag}  pages={rec.pages_total}  "
-                f"labels={rec.labels_total}",
+                f"     {tag}  [{rec.primary_category or '?'}]  "
+                f"pages={rec.pages_total}  "
+                f"labels={rec.labels_total} ({kind_str})",
                 flush=True,
             )
 
