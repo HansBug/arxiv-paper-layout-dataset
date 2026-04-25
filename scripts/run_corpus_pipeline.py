@@ -544,6 +544,27 @@ class Driver:
                     f"(primary in skip_primary_cats)",
                     flush=True,
                 )
+                # Persist a skipped record so this arxiv_id is never
+                # re-fetched. Without this the same candidate keeps
+                # coming back on every fetch_candidates call — if
+                # every result in the batch is skip_primary_cats, the
+                # scheduler gets stuck in a tight loop.
+                skipped = PaperRecord(
+                    arxiv_id=cand["arxiv_id"],
+                    archive=archive,
+                    primary_category=primary,
+                    categories=cand.get("categories", []),
+                    year=cand.get("year", ""),
+                    title=cand.get("title", ""),
+                    abs_url=cand.get("abs_url", ""),
+                    source_url=cand.get("source_url", ""),
+                    status=STATUS_FAILED,
+                    reason=f"skip_primary_cat:{primary}",
+                    started_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    finished_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                )
+                self.state.upsert(skipped)
+                self.state.save()
                 continue
             print(
                 f"  -> {cand['arxiv_id']} [{primary or '?'}]  "
