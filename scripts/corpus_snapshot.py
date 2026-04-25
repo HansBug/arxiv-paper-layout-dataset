@@ -132,19 +132,19 @@ def _print_subset_table(subsets: dict[str, dict]) -> None:
     """Print a compact three-column text table.
 
     Row order: a human-facing explanation of each subset's label scope,
-    then the size metrics, then the 8 per-class counts across every
-    paper that PASSES the subset's spatial-pair filter. Kinds that
-    aren't in the subset's active-class list (e.g. ``algorithm*`` under
-    the 6-label subset) still appear: a non-zero cell there means
-    those instances exist in passing papers but would be *dropped* at
-    export time under that subset. That's a useful signal for judging
-    subset trade-offs.
+    then the size metrics, then the 8 per-class counts. **Classes that
+    aren't in a subset's active list render as ``--``** — e.g. the
+    6-label column shows ``--`` for ``algorithm`` / ``algorithm_cap``,
+    and the 4-label column shows ``--`` for those plus ``listing`` /
+    ``listing_cap``. A concrete number there would be misleading
+    because those instances get dropped at export time under that
+    subset.
     """
     names = list(CLASS_SUBSETS.keys())
     label_w = 18
     col_w = 12
 
-    def _row(cells: list[str], right_align_from: int = 1) -> str:
+    def _row(cells: list[str]) -> str:
         out = [cells[0].ljust(label_w)]
         for cell in cells[1:]:
             out.append(cell.rjust(col_w))
@@ -166,7 +166,13 @@ def _print_subset_table(subsets: dict[str, dict]) -> None:
 
     print(_row(["-- kinds --", *["" for _ in names]]))
     for cls in CLASSES:
-        print(_row([cls, *[str(subsets[n]["kinds"][cls]) for n in names]]))
+        cells = [cls]
+        for name in names:
+            if cls in CLASS_SUBSETS[name]:
+                cells.append(str(subsets[name]["kinds"][cls]))
+            else:
+                cells.append("--")
+        print(_row(cells))
 
 
 def main() -> int:
