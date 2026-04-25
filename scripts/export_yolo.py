@@ -86,24 +86,116 @@ def count_kinds(annotations: dict) -> dict[str, int]:
     return out
 
 
-def paper_passes_strict_1to1(
-    kinds: dict[str, int],
+def _pair_per_page_bboxes(
+    annotations: dict,
     active_classes: tuple[str, ...],
-) -> bool:
-    """True iff every pair (body, cap) where BOTH are in ``active_classes``
-    has matching counts AND at least one such pair has count > 0."""
+):
+    """Yield ``(body_kind, cap_kind, bodies_xywh, caps_xywh)`` per page, per
+    active pair. Pairs whose both members aren't in ``active_classes`` are
+    skipped. Pages with neither body nor cap are skipped.
+    """
     active = set(active_classes)
-    has_any = False
-    for body, cap in CAPTION_PAIRS:
-        if body not in active or cap not in active:
+    active_pairs = [(b, c) for b, c in CAPTION_PAIRS
+                    if b in active and c in active]
+    if not active_pairs:
+        return
+    kind_by_cat = {c["id"]: c["name"] for c in annotations.get("categories", [])}
+    per_page: dict[int, dict[str, list]] = {}
+    for item in annotations.get("annotations", []):
+        kind = kind_by_cat.get(item["category_id"])
+        if kind is None:
             continue
-        b = kinds.get(body, 0)
-        c = kinds.get(cap, 0)
-        if b != c:
+        per_page.setdefault(item["image_id"], {}).setdefault(kind, []).append(item["bbox"])
+    for page_kinds in per_page.values():
+        for body_kind, cap_kind in active_pairs:
+            bodies = page_kinds.get(body_kind, [])
+            caps = page_kinds.get(cap_kind, [])
+            if not bodies and not caps:
+                continue
+            yield body_kind, cap_kind, bodies, caps
+
+
+def paper_passes_strict_1to1(
+    annotations: dict,
+    active_classes: tuple[str, ...],
+    iou_thresh: float = 0.9,
+) -> bool:
+    """Strict 1:1 with spatial validity:
+
+    - On every page, ``count(body) == count(cap)`` for each active pair.
+    - Every body is mostly contained in some cap, every cap holds >=1
+      body (orphan body / empty cap -> reject).
+    - At least one pair somewhere is non-empty.
+    """
+    any_pair_nonempty = False
+    for body_kind, cap_kind, bodies, caps in _pair_per_page_bboxes(
+        annotations, active_classes
+    ):
+        if len(bodies) != len(caps):
             return False
-        if b > 0:
-            has_any = True
-    return has_any
+        for bb in bodies:
+            if not any(_body_mostly_inside_cap(bb, cb, iou_thresh) for cb in caps):
+                return False
+        for cb in caps:
+            if not any(_body_mostly_inside_cap(bb, cb, iou_thresh) for bb in bodies):
+                return False
+        any_pair_nonempty = True
+    return any_pair_nonempty
+
+
+def _body_mostly_inside_cap(body_xywh, cap_xywh, thresh: float) -> bool:
+    """True iff ``body`` is mostly contained in ``cap``.
+
+    ``intersection_area / body_area >= thresh``, so a fig bbox that sits
+    cleanly inside its fig_cap bbox (or overshoots it by a small
+    amount) counts as contained.
+    """
+    xa, ya, wa, ha = body_xywh
+    xc, yc, wc, hc = cap_xywh
+    ix0 = max(xa, xc); iy0 = max(ya, yc)
+    ix1 = min(xa + wa, xc + wc); iy1 = min(ya + ha, yc + hc)
+    iw = max(0.0, ix1 - ix0)
+    ih = max(0.0, iy1 - iy0)
+    inter = iw * ih
+    body_area = max(1e-9, wa * ha)
+    return (inter / body_area) >= thresh
+
+
+def paper_passes_spatial_pairing(
+    annotations: dict,
+    active_classes: tuple[str, ...],
+    iou_thresh: float = 0.9,
+) -> bool:
+    """Relaxed alternative to strict 1:1 based on bbox containment.
+
+    For every pair ``(body, cap)`` where BOTH names are in
+    ``active_classes``, on every page:
+
+    - Every ``body`` bbox must be *mostly contained* in some ``cap``
+      bbox on that page (``intersection / body_area >= iou_thresh``).
+      An orphan body (no parent cap) rejects the paper.
+    - Every ``cap`` bbox must have at least one body mostly contained
+      in it. An empty cap (no child body) rejects the paper.
+    - At least one (body, cap) pair must be non-empty *somewhere* in
+      the paper, otherwise there's nothing to learn.
+
+    Unlike :func:`paper_passes_strict_1to1`, per-page counts do not
+    have to match: one ``fig_cap`` enclosing multiple ``fig`` bboxes
+    (the common subfigure pattern) is accepted.
+    """
+    any_pair_nonempty = False
+    for body_kind, cap_kind, bodies, caps in _pair_per_page_bboxes(
+        annotations, active_classes
+    ):
+        for bb in bodies:
+            if not any(_body_mostly_inside_cap(bb, cb, iou_thresh) for cb in caps):
+                return False
+        for cb in caps:
+            if not any(_body_mostly_inside_cap(bb, cb, iou_thresh) for bb in bodies):
+                return False
+        if bodies and caps:
+            any_pair_nonempty = True
+    return any_pair_nonempty
 
 
 def pick_split(stem: str, weights: tuple[int, int, int]) -> str:
@@ -226,6 +318,8 @@ def export(
     jpg_quality: int = 90,
     active_classes: tuple[str, ...] = CLASSES,
     strict_1to1: bool = False,
+    spatial_pair: bool = False,
+    spatial_iou_thresh: float = 0.9,
 ) -> dict[str, int]:
     out.mkdir(parents=True, exist_ok=True)
     for subset in ("train", "val", "test"):
@@ -240,15 +334,23 @@ def export(
         "test": 0,
         "skipped_no_labels": 0,
         "skipped_papers_not_1to1": 0,
+        "skipped_papers_no_spatial_pair": 0,
     }
 
     for input_root in inputs:
         for paper_id, ann_path, pages_dir in iter_papers(input_root):
             annotations = json.loads(ann_path.read_text(encoding="utf-8"))
             if strict_1to1:
-                kinds = count_kinds(annotations)
-                if not paper_passes_strict_1to1(kinds, active_classes):
+                if not paper_passes_strict_1to1(
+                    annotations, active_classes, spatial_iou_thresh
+                ):
                     counts["skipped_papers_not_1to1"] += 1
+                    continue
+            elif spatial_pair:
+                if not paper_passes_spatial_pairing(
+                    annotations, active_classes, spatial_iou_thresh
+                ):
+                    counts["skipped_papers_no_spatial_pair"] += 1
                     continue
             size_by_id = {
                 img["id"]: (img["width"], img["height"]) for img in annotations["images"]
@@ -387,13 +489,32 @@ def main() -> int:
         "output dataset follows this order. Default: all 8 classes. "
         f"Valid: {','.join(CLASSES)}",
     )
-    parser.add_argument(
+    filter_group = parser.add_mutually_exclusive_group()
+    filter_group.add_argument(
         "--strict-1to1",
         action="store_true",
-        help="only include papers where every (body, caption) pair whose "
-        "BOTH members are in --classes has matching counts AND at least "
-        "one such pair is non-empty. Useful for producing a clean training "
-        "subset without caption/body mismatches.",
+        help="Only keep papers where every active pair is 1:1 AND "
+        "spatially valid (same per-page count, every body bbox mostly "
+        "inside some cap bbox, every cap bbox holds at least one body). "
+        "Use this for the cleanest possible training subset.",
+    )
+    filter_group.add_argument(
+        "--spatial-pair",
+        action="store_true",
+        help="Only keep papers where every active pair is spatially "
+        "valid, relaxed to N:1 — one cap can hold multiple bodies, "
+        "which covers the common multi-subfigure pattern. Orphan body "
+        "(not inside any cap) or empty cap (no body inside) still "
+        "rejects the paper. Larger subset than --strict-1to1.",
+    )
+    parser.add_argument(
+        "--spatial-iou-thresh",
+        type=float,
+        default=0.9,
+        help="threshold for 'body mostly inside cap' (intersection_area "
+        "/ body_area). Default 0.9 — a body bbox is accepted if ≥90%% "
+        "of its area falls inside the cap bbox. Lower values tolerate "
+        "more body-bbox overflow.",
     )
     args = parser.parse_args()
 
@@ -407,8 +528,18 @@ def main() -> int:
         jpg_quality=args.jpg_quality,
         active_classes=args.classes,
         strict_1to1=args.strict_1to1,
+        spatial_pair=args.spatial_pair,
+        spatial_iou_thresh=args.spatial_iou_thresh,
     )
-    print(f"[classes] {list(args.classes)}  (strict_1to1={args.strict_1to1})")
+    mode = (
+        "strict-1to1" if args.strict_1to1
+        else "spatial-pair" if args.spatial_pair
+        else "all (no filter)"
+    )
+    print(
+        f"[classes] {list(args.classes)}  filter={mode}  "
+        f"iou_thresh={args.spatial_iou_thresh}"
+    )
     print(
         f"[done] {sum(v for k, v in counts.items() if k != 'skipped_no_labels')} images "
         f"-> {args.out}"
