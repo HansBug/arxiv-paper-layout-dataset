@@ -19,6 +19,11 @@ Label files are plain YOLO: one row per instance, each row is::
 
     <class_index> <cx_norm> <cy_norm> <w_norm> <h_norm>
 
+Pages with no annotations of any active class are exported as pure
+negative samples (an image paired with an empty ``.txt`` label file).
+YOLO treats these as background examples, which reduces false positives.
+Use ``--skip-negatives`` to drop them instead.
+
 Image processing:
 - Default output format: JPG (``--format jpg``; ``--format png`` keeps PNG).
 - Default resize policy: if ``min(width, height) > 720``, scale so the
@@ -320,6 +325,7 @@ def export(
     strict_1to1: bool = False,
     spatial_pair: bool = False,
     spatial_iou_thresh: float = 0.9,
+    include_negatives: bool = True,
 ) -> dict[str, int]:
     out.mkdir(parents=True, exist_ok=True)
     for subset in ("train", "val", "test"):
@@ -332,6 +338,8 @@ def export(
         "train": 0,
         "val": 0,
         "test": 0,
+        "positives": 0,
+        "negatives": 0,
         "skipped_no_labels": 0,
         "skipped_papers_not_1to1": 0,
         "skipped_papers_no_spatial_pair": 0,
@@ -367,8 +375,12 @@ def export(
 
                 rows = labels.get(image_id, [])
                 if not rows:
-                    counts["skipped_no_labels"] += 1
-                    continue
+                    if not include_negatives:
+                        counts["skipped_no_labels"] += 1
+                        continue
+                    is_negative = True
+                else:
+                    is_negative = False
 
                 dst_img = out / "images" / split / f"{stem}{ext}"
                 dst_lbl = out / "labels" / split / f"{stem}.txt"
@@ -387,8 +399,12 @@ def export(
                     _write_image(
                         src_img, dst_img, image_format, max_short_side, jpg_quality
                     )
-                dst_lbl.write_text("\n".join(rows) + "\n", encoding="utf-8")
+                # Empty `.txt` (0 rows) is a valid YOLO negative sample.
+                dst_lbl.write_text(
+                    ("\n".join(rows) + "\n") if rows else "", encoding="utf-8"
+                )
                 counts[split] += 1
+                counts["negatives" if is_negative else "positives"] += 1
 
     data_yaml = out / "data.yaml"
     data_yaml.write_text(
@@ -516,6 +532,24 @@ def main() -> int:
         "of its area falls inside the cap bbox. Lower values tolerate "
         "more body-bbox overflow.",
     )
+    neg_group = parser.add_mutually_exclusive_group()
+    neg_group.add_argument(
+        "--include-negatives",
+        dest="include_negatives",
+        action="store_true",
+        default=True,
+        help="Export pages with no active-class annotations as pure "
+        "negative samples (empty .txt label file). YOLO uses them as "
+        "background examples, which reduces false positives. Default: on.",
+    )
+    neg_group.add_argument(
+        "--skip-negatives",
+        dest="include_negatives",
+        action="store_false",
+        help="Drop pages with no active-class annotations instead of "
+        "exporting them as negatives. Use this if you only want "
+        "label-bearing pages.",
+    )
     args = parser.parse_args()
 
     counts = export(
@@ -530,20 +564,20 @@ def main() -> int:
         strict_1to1=args.strict_1to1,
         spatial_pair=args.spatial_pair,
         spatial_iou_thresh=args.spatial_iou_thresh,
+        include_negatives=args.include_negatives,
     )
     mode = (
         "strict-1to1" if args.strict_1to1
         else "spatial-pair" if args.spatial_pair
         else "all (no filter)"
     )
+    neg_mode = "include-negatives" if args.include_negatives else "skip-negatives"
     print(
         f"[classes] {list(args.classes)}  filter={mode}  "
-        f"iou_thresh={args.spatial_iou_thresh}"
+        f"iou_thresh={args.spatial_iou_thresh}  negatives={neg_mode}"
     )
-    print(
-        f"[done] {sum(v for k, v in counts.items() if k != 'skipped_no_labels')} images "
-        f"-> {args.out}"
-    )
+    total_written = counts["train"] + counts["val"] + counts["test"]
+    print(f"[done] {total_written} images -> {args.out}")
     for k, v in counts.items():
         print(f"  {k}: {v}")
     return 0
