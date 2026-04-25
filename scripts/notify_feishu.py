@@ -1,25 +1,33 @@
 #!/usr/bin/env python3
-"""Post a corpus-monitor card to a Feishu custom-bot webhook.
+"""Post a Feishu (Lark) interactive card to the project's custom-bot
+webhook, using card JSON schema 2.0 so we can mix native components
+(table, divider, markdown, ...) instead of stuffing everything into
+one big markdown blob.
 
-The Feishu bot on this repo enforces a keyword filter — outgoing
-messages must contain the word ``播报`` or they're rejected. Every
-card template below includes that keyword in the title by design.
+The Feishu bot on this repo enforces a content-keyword filter — the
+outgoing message must contain ``播报`` or it's rejected. Every card
+title is auto-prefixed with the keyword if the caller forgot.
 
-Usage (command line)::
+Usage:
 
-    python3 scripts/notify_feishu.py --kind A \
-        --title "corpus 播报 @ 1485/1066 OK" \
-        --body "$(cat body.md)"
+    # full custom: pass elements JSON via stdin
+    cat <<'EOF' | python3 scripts/notify_feishu.py \
+        --kind B --title "corpus 播报 @ 1488 papers"
+    [
+      {"tag": "markdown", "content": "## SNAPSHOT\n- papers: 1488"},
+      {"tag": "hr"},
+      {"tag": "table", "columns": [...], "rows": [...]}
+    ]
+    EOF
 
-Or via stdin::
-
-    cat body.md | python3 scripts/notify_feishu.py --kind B \
-        --title "corpus B 播报 — SUBSETS snapshot"
+    # OR use --elements-file
+    python3 scripts/notify_feishu.py --kind B --title "..." \
+        --elements-file body.json
 
 The webhook URL comes from $FEISHU_WEBHOOK, falling back to the
 known project-bot URL embedded below. Exit 0 on HTTP success,
-non-zero on any error — kept simple so it's OK to call from a loop
-without killing the monitor.
+non-zero on any error — kept simple so callers can decide whether
+to retry.
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ import json
 import os
 import sys
 import urllib.request
+from pathlib import Path
 
 DEFAULT_WEBHOOK = (
     "https://open.feishu.cn/open-apis/bot/v2/hook/"
@@ -36,37 +45,45 @@ DEFAULT_WEBHOOK = (
 )
 KEYWORD = "播报"
 
+HEADER_TEMPLATES = {
+    "A": "wathet",
+    "B": "blue",
+    "ALERT": "orange",
+    "CRITICAL": "red",
+    "INFO": "grey",
+    "OK": "green",
+}
 
-def _card(title: str, body_md: str, kind: str) -> dict:
-    """Build a Feishu interactive card.
 
-    Header colour is chosen by ``kind``:
-    - A (per-paper broadcast) → wathet (light blue), low visual weight
-    - B (10-min snapshot)     → blue,   medium visual weight
-    - ALERT / CRITICAL        → red,    high visual weight
+def build_card(
+    title: str,
+    elements: list[dict],
+    kind: str = "B",
+    subtitle: str | None = None,
+) -> dict:
+    """Assemble a Feishu schema-2.0 interactive card envelope.
+
+    ``elements`` is the body content as a list of native v2 components
+    (``markdown`` / ``table`` / ``hr`` / ``column_set`` / ...).  We
+    splice them into the card unchanged so the caller has full
+    control over rendering.
     """
-    template = {
-        "A": "wathet",
-        "B": "blue",
-        "ALERT": "red",
-        "CRITICAL": "red",
-        "INFO": "grey",
-    }.get(kind, "wathet")
-    if KEYWORD not in title and KEYWORD not in body_md:
-        # Keyword filter: prepend to title so the bot accepts the card
-        # without polluting the body.
+    template = HEADER_TEMPLATES.get(kind, "blue")
+    if KEYWORD not in title:
         title = f"【{KEYWORD}】{title}"
+    header = {
+        "title": {"tag": "plain_text", "content": title},
+        "template": template,
+    }
+    if subtitle:
+        header["subtitle"] = {"tag": "plain_text", "content": subtitle}
     return {
         "msg_type": "interactive",
         "card": {
+            "schema": "2.0",
             "config": {"wide_screen_mode": True},
-            "header": {
-                "title": {"tag": "plain_text", "content": title},
-                "template": template,
-            },
-            "elements": [
-                {"tag": "markdown", "content": body_md},
-            ],
+            "header": header,
+            "body": {"elements": elements},
         },
     }
 
@@ -80,24 +97,45 @@ def send(payload: dict, webhook: str, timeout: float = 10.0) -> tuple[int, str]:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            return resp.status, body
+            return resp.status, resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         return -1, f"error: {exc}"
 
 
+def _read_elements(args: argparse.Namespace) -> list[dict]:
+    if args.elements_file:
+        raw = Path(args.elements_file).read_text(encoding="utf-8")
+    else:
+        raw = sys.stdin.read()
+    try:
+        elements = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        sys.stderr.write(f"elements JSON parse error: {exc}\n")
+        sys.exit(2)
+    if not isinstance(elements, list):
+        sys.stderr.write("elements must be a JSON array\n")
+        sys.exit(2)
+    return elements
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--kind",
-        choices=("A", "B", "ALERT", "CRITICAL", "INFO"),
-        default="A",
-    )
     parser.add_argument("--title", required=True)
     parser.add_argument(
-        "--body",
+        "--subtitle",
         default=None,
-        help="Markdown body. If omitted, read from stdin.",
+        help="optional subtitle line under the header",
+    )
+    parser.add_argument(
+        "--kind",
+        choices=tuple(HEADER_TEMPLATES.keys()),
+        default="B",
+    )
+    parser.add_argument(
+        "--elements-file",
+        default=None,
+        help="path to a JSON file containing the body.elements array. "
+        "If omitted, the array is read from stdin.",
     )
     parser.add_argument(
         "--webhook",
@@ -106,12 +144,12 @@ def main() -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Render the card JSON to stdout without POSTing.",
+        help="print the assembled card JSON to stdout without POSTing",
     )
     args = parser.parse_args()
 
-    body = args.body if args.body is not None else sys.stdin.read()
-    payload = _card(args.title, body, args.kind)
+    elements = _read_elements(args)
+    payload = build_card(args.title, elements, args.kind, args.subtitle)
 
     if args.dry_run:
         json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
@@ -119,10 +157,8 @@ def main() -> int:
         return 0
 
     status, resp_body = send(payload, args.webhook)
-    # Feishu returns HTTP 200 + JSON {"code":0,"msg":"success",...} on ok.
     try:
-        resp_obj = json.loads(resp_body)
-        code = resp_obj.get("code")
+        code = json.loads(resp_body).get("code")
     except Exception:  # noqa: BLE001
         code = None
     if status == 200 and code == 0:
