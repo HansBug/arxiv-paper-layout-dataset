@@ -211,7 +211,9 @@ def _health_lines(state: dict, subsets: dict[str, dict]) -> list[str]:
 LABEL_RICH_ARCHIVES: dict[str, list[str]] = {
     "table":     ["stat", "econ", "q-fin", "q-bio", "eess"],
     "algorithm": ["cs"],  # ML/DS subcategories of cs are pseudocode-heavy
-    "listing":   ["cs"],
+    # listing intentionally excluded: user (2026-04-25) explicitly
+    # deprioritised it. arxiv papers almost never wrap code in a
+    # ``listing`` float, so chasing balance here is a losing game.
 }
 
 
@@ -223,7 +225,7 @@ def _starving_kinds(stats: dict) -> list[tuple[str, int, float]]:
     if fig <= 0:
         return []
     out: list[tuple[str, int, float]] = []
-    for kind in ("algorithm", "table", "listing"):
+    for kind in ("algorithm", "table"):
         n = kh.get(kind, 0)
         ratio = fig / max(1, n)
         # Only flag if the body kind trails figure by more than 4x.

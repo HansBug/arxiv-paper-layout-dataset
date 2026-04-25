@@ -17,9 +17,12 @@ The two predicates below encode the two accepted training subsets:
   PLUS per-page count equality for each active pair.
 
 Both predicates ignore pairs whose members aren't in
-``active_classes``; they also require that at least one active pair
-is non-empty *somewhere* in the paper (otherwise there's nothing to
-learn).
+``active_classes``. A paper with zero active body/cap instances at
+all (pure-text math paper, or an algorithm-only paper checked
+against the 4-label subset) passes vacuously — there is nothing
+to violate, and rejecting it would break the strict monotonicity
+``papers_pass[8] ⊆ papers_pass[6] ⊆ papers_pass[4]`` that downstream
+health checks depend on.
 """
 
 from __future__ import annotations
@@ -137,14 +140,16 @@ def paper_passes_spatial_pairing(
       that page. An orphan body (no parent cap) rejects the paper.
     - Every cap bbox must have at least one body mostly contained in
       it. An empty cap (no child body) rejects the paper.
-    - At least one (body, cap) pair must be non-empty *somewhere*,
-      otherwise there's nothing to learn.
+
+    A paper with no active body/cap instances anywhere passes
+    vacuously — preserving strict monotonicity across the 8/6/4
+    subsets. Such a paper contributes zero kind counts but does count
+    as a passing paper (negative-only training sample).
 
     Unlike :func:`paper_passes_strict_1to1`, per-page counts do NOT
     have to match: one ``figure_cap`` enclosing multiple ``figure`` bboxes
     (the common subfigure pattern) is accepted.
     """
-    any_pair_nonempty = False
     for body_kind, cap_kind, bodies, caps in _pair_per_page_bboxes(
         annotations, active_classes
     ):
@@ -158,9 +163,7 @@ def paper_passes_spatial_pairing(
                 _body_mostly_inside_cap(bb, cb, iou_thresh) for bb in bodies
             ):
                 return False
-        if bodies and caps:
-            any_pair_nonempty = True
-    return any_pair_nonempty
+    return True
 
 
 def paper_passes_strict_1to1(
@@ -171,9 +174,10 @@ def paper_passes_strict_1to1(
     """Strict 1:1 + spatial validity — cleanest (smallest) subset.
 
     Same as :func:`paper_passes_spatial_pairing` plus: on every page,
-    ``count(body) == count(cap)`` for each active pair.
+    ``count(body) == count(cap)`` for each active pair. A paper with
+    no active body/cap instances anywhere passes vacuously, same as
+    the relaxed predicate.
     """
-    any_pair_nonempty = False
     for body_kind, cap_kind, bodies, caps in _pair_per_page_bboxes(
         annotations, active_classes
     ):
@@ -189,8 +193,7 @@ def paper_passes_strict_1to1(
                 _body_mostly_inside_cap(bb, cb, iou_thresh) for bb in bodies
             ):
                 return False
-        any_pair_nonempty = True
-    return any_pair_nonempty
+    return True
 
 
 def count_kinds(annotations: dict) -> dict[str, int]:
