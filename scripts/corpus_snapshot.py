@@ -81,12 +81,23 @@ def main() -> int:
     untouched = sorted(a for a in ARXIV_ARCHIVES if a not in archives_hist)
     covered = sorted(a for a in ARXIV_ARCHIVES if a in archives_hist)
 
+    papers_ok = stats.get("papers_ok", 0)
+    papers_failed = stats.get("papers_failed", 0)
+    papers_total = papers_ok + papers_failed
+    kinds = stats.get("labels_by_kind", {}) or {}
+    total_labels = sum(kinds.values())
+    pages_total = stats.get("pages_total", 0)
+    pages_with_labels = stats.get("pages_with_labels", 0)
+
     parts = [
         "SNAPSHOT",
-        f"papers_ok={stats.get('papers_ok', 0)}",
-        f"papers_failed={stats.get('papers_failed', 0)}",
-        f"pages_with_labels={stats.get('pages_with_labels', 0)}",
-        "kinds=" + json.dumps(stats.get("labels_by_kind", {}), ensure_ascii=False),
+        f"papers_total={papers_total}",
+        f"papers_ok={papers_ok}",
+        f"papers_failed={papers_failed}",
+        f"pages_total={pages_total}",
+        f"pages_with_labels={pages_with_labels}",
+        f"total_labels={total_labels}",
+        "kinds=" + json.dumps(kinds, ensure_ascii=False),
         "archives=" + json.dumps(archives_hist, ensure_ascii=False),
         f"archive_coverage={len(covered)}/{len(ARXIV_ARCHIVES)}",
         "untouched_archives=" + json.dumps(untouched, ensure_ascii=False),
