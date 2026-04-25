@@ -1,6 +1,6 @@
 """Shared helpers for deciding whether a paper's bbox layout is "clean
 enough" for training, by checking spatial pairing between every
-body label (fig / table / algorithm / listing) and its matching
+body label (figure / table / algorithm / listing) and its matching
 caption label.
 
 Three scripts depend on this — ``export_yolo.py`` (paper-level filter
@@ -11,8 +11,8 @@ table) — so the logic lives here rather than duplicated.
 The two predicates below encode the two accepted training subsets:
 
 - :func:`paper_passes_spatial_pairing` — default, N:1 containment.
-  Accepts the common subfigure pattern: one ``fig_cap`` holding
-  multiple ``fig`` bboxes is fine.
+  Accepts the common subfigure pattern: one ``figure_cap`` holding
+  multiple ``figure`` bboxes is fine.
 - :func:`paper_passes_strict_1to1` — stricter. Same spatial checks
   PLUS per-page count equality for each active pair.
 
@@ -29,8 +29,8 @@ from typing import Iterable, Iterator
 
 # Canonical class ordering — shared with ``scripts/export_yolo.py``.
 CLASSES: tuple[str, ...] = (
-    "fig",
-    "fig_cap",
+    "figure",
+    "figure_cap",
     "table",
     "table_cap",
     "algorithm",
@@ -50,14 +50,14 @@ CLASS_SUBSETS: dict[str, tuple[str, ...]] = {
     # in the subset would just reject every paper with a stray
     # ``lstlisting`` block. ``algorithm`` still matters for ML-flavour
     # papers where pseudocode is integral.
-    "6": ("fig", "fig_cap", "table", "table_cap", "algorithm", "algorithm_cap"),
-    "4": ("fig", "fig_cap", "table", "table_cap"),
+    "6": ("figure", "figure_cap", "table", "table_cap", "algorithm", "algorithm_cap"),
+    "4": ("figure", "figure_cap", "table", "table_cap"),
 }
 
 # Body/caption pairs used for every spatial check. A subset export
 # drops pairs whose members aren't both in the active set.
 CAPTION_PAIRS: tuple[tuple[str, str], ...] = (
-    ("fig", "fig_cap"),
+    ("figure", "figure_cap"),
     ("table", "table_cap"),
     ("algorithm", "algorithm_cap"),
     ("listing", "listing_cap"),
@@ -141,7 +141,7 @@ def paper_passes_spatial_pairing(
       otherwise there's nothing to learn.
 
     Unlike :func:`paper_passes_strict_1to1`, per-page counts do NOT
-    have to match: one ``fig_cap`` enclosing multiple ``fig`` bboxes
+    have to match: one ``figure_cap`` enclosing multiple ``figure`` bboxes
     (the common subfigure pattern) is accepted.
     """
     any_pair_nonempty = False

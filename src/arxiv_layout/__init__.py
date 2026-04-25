@@ -1,6 +1,6 @@
 """arxiv-paper-layout-dataset
 
-Build object-detection training data (fig / fig_cap / table / table_cap /
+Build object-detection training data (figure / figure_cap / table / table_cap /
 algorithm / algorithm_cap / listing / listing_cap) from arXiv LaTeX sources.
 
 Approach:

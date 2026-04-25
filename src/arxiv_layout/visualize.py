@@ -10,8 +10,8 @@ from .render import BBox, ResolvedLabel, bbox_pt_to_px
 
 
 COLORS = {
-    "fig": (230, 25, 75),         # red
-    "fig_cap": (255, 150, 150),
+    "figure": (230, 25, 75),         # red
+    "figure_cap": (255, 150, 150),
     "table": (60, 180, 75),       # green
     "table_cap": (180, 230, 180),
     "algorithm": (0, 130, 200),   # blue

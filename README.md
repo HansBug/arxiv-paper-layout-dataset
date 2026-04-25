@@ -3,7 +3,7 @@
 Build object-detection training data for paper-page layouts straight out of
 arXiv LaTeX sources. Classes are
 
-- `fig` / `fig_cap` — a figure's image region, and the whole figure float
+- `figure` / `figure_cap` — a figure's image region, and the whole figure float
   (image + caption).
 - `table` / `table_cap` — a table's `tabular` grid, and the whole float.
 - `algorithm` / `algorithm_cap` — a pseudocode block, and the float with its
@@ -340,8 +340,8 @@ monitors on ``driver.log`` + ``state.json``:
 
    It then prints a **3-column SUBSETS table** showing what the
    exported dataset would look like under each of three class
-   policies — ``8-label`` (full), ``6-label`` (drop algorithm pair),
-   ``4-label`` (drop algorithm + listing pairs) — after applying the
+   policies — ``8-label`` (full), ``6-label`` (drop listing pair),
+   ``4-label`` (drop listing + algorithm pairs) — after applying the
    default ``--spatial-pair`` paper-level filter. Rows:
    ``papers_pass`` / ``pages_total`` / ``pages_no_label`` (pure
    negative samples) / per-kind instance counts for each of the 8
@@ -358,7 +358,7 @@ monitors on ``driver.log`` + ``state.json``:
 
    **Intervention policy for the slow monitor**:
 
-   - **Label-kind balance**: the eight classes (``fig / fig_cap /
+   - **Label-kind balance**: the eight classes (``figure / figure_cap /
      table / table_cap / algorithm / algorithm_cap / listing /
      listing_cap``) should all be populated. If any are still 0 after
      a few dozen papers, ``force_next_archive`` toward an archive that
@@ -407,7 +407,7 @@ python3 scripts/export_yolo.py \
   #   --max-short-side 0                        no resize
   #   --jpg-quality 85                          cheaper JPEG
   #   --symlink                                 dev only (same-format + no resize)
-  #   --classes fig,fig_cap,table,table_cap     subset export (4-class)
+  #   --classes figure,figure_cap,table,table_cap     subset export (4-class)
   #   --strict-1to1                             clean subset; 1:1 + containment
   #   --no-filter                               export every paper
   #   --skip-negatives                          drop label-free pages
@@ -418,7 +418,7 @@ exported iff every active body/cap pair is *spatially valid*: every
 body bbox is mostly contained in some cap bbox (≥90% of its area), and
 every cap bbox holds at least one body. Orphan body or empty cap
 rejects the paper. This tolerates the common sub-figure pattern
-(one `fig_cap` enclosing N `fig` bboxes) that strict 1:1 would wrongly
+(one `figure_cap` enclosing N `figure` bboxes) that strict 1:1 would wrongly
 throw away. `--strict-1to1` shrinks to a 1:1 subset; `--no-filter`
 disables paper-level filtering entirely.
 
@@ -442,7 +442,7 @@ Each `.txt` has one row per instance:
 <class_index> <cx_norm> <cy_norm> <w_norm> <h_norm>
 ```
 
-Classes are listed in the order `fig / fig_cap / table / table_cap /
+Classes are listed in the order `figure / figure_cap / table / table_cap /
 algorithm / algorithm_cap / listing / listing_cap`.
 
 By default images are **copied** (not symlinked) so the dataset ships
@@ -453,7 +453,7 @@ format matches and `--max-short-side 0`.
 ## Known limitations
 
 - `subfigure` / `subcaption` sub-labels are not emitted separately; only
-  the parent `fig_cap` covers the whole float.
+  the parent `figure_cap` covers the whole float.
 - `minted` code blocks aren't recognised (use the `listings` package).
 - Figures whose only content is a `tikzpicture` use the picture's declared
   bounding box, which may undershoot arrow heads / labels that TikZ draws

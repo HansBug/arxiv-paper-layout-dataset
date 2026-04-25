@@ -24,11 +24,11 @@ Then, on a separate block, prints a 3-column **SUBSETS** table across
 the three class-sets we care about at training time, applying the
 spatial-pair (N:1 with containment) filter:
 
-- ``8``  = all classes (fig / fig_cap / table / table_cap /
+- ``8``  = all classes (figure / figure_cap / table / table_cap /
            algorithm / algorithm_cap / listing / listing_cap)
-- ``6``  = drop algorithm pair (fig / fig_cap / table / table_cap /
-           listing / listing_cap)  — the user's "6 label" meaning
-- ``4``  = drop algorithm + listing (fig / fig_cap / table / table_cap)
+- ``6``  = drop listing pair (figure / figure_cap / table / table_cap /
+           algorithm / algorithm_cap)  — the user's "6 label" meaning
+- ``4``  = drop listing + algorithm (figure / figure_cap / table / table_cap)
 
 For each subset: ``papers_pass`` (passing spatial-pair), ``pages_total``
 (all pages of passing papers), ``pages_without_labels`` (pages of

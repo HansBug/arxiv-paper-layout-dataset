@@ -184,8 +184,8 @@ PREAMBLE_INJECTION = r"""
 # cap variants are always keyed under the float id, body variants under the
 # inner content id.
 LABEL_CLASSES = {
-    "fig",
-    "fig_cap",
+    "figure",
+    "figure_cap",
     "table",
     "table_cap",
     "algorithm",
@@ -200,7 +200,7 @@ class LabeledAnchor:
     """A logical label backed by one or more raw zref anchors."""
 
     label_id: str            # eg fig_3
-    kind: str                # eg fig
+    kind: str                # eg figure
     float_id: str | None     # eg figure_0 (None for freestanding listings)
     anchor_names: list[str]  # zref anchor names we read coordinates from
     method: str              # "wrap" (2D corners) or "span" (top/bot pair, x from textwidth)
@@ -460,7 +460,7 @@ class LatexBBoxInjector:
         # Scan + rewrite floats FIRST so the preamble's comment text (which
         # mentions \begin{algorithm} etc. only as documentation) doesn't get
         # picked up by the env regex.
-        tex = self._inject_floats(tex, env="figure", kind_body="fig")
+        tex = self._inject_floats(tex, env="figure", kind_body="figure")
         tex = self._inject_floats(tex, env="table", kind_body="table")
         tex = self._inject_floats(tex, env="algorithm", kind_body="algorithm")
         tex = self._inject_floats(tex, env="algorithm2e", kind_body="algorithm")
@@ -520,7 +520,7 @@ class LatexBBoxInjector:
             # an un-instrumented figure overwrites the stored coords of an
             # earlier cap anchor.
             #
-            # We emit fig_cap / table_cap ONLY when either (a) we wrapped an
+            # We emit figure_cap / table_cap ONLY when either (a) we wrapped an
             # atomic body (includegraphics / tikzpicture / tabular), or (b)
             # the body contains a ``\caption{...}`` -- the caption hook will
             # give us real coords for the cap. Otherwise the figure is just
@@ -549,7 +549,7 @@ class LatexBBoxInjector:
                 wrapped = trial != body
                 # LLaVA qualitative appendix etc use tcolorbox + lstlisting
                 # with no \includegraphics/tikzpicture. If the figure has a
-                # caption we still want a fig body -- fall back to a span
+                # caption we still want a figure body -- fall back to a span
                 # from the figure's inner-top to just-before the caption.
                 if not wrapped and has_caption:
                     new_body = self._wrap_fig_span(trial, kind_body, float_id)
@@ -1144,7 +1144,7 @@ class MultiFileInjector:
 
     def _inject_floats_only(self, tex: str) -> str:
         inj = self.injector
-        tex = inj._inject_floats(tex, env="figure", kind_body="fig")
+        tex = inj._inject_floats(tex, env="figure", kind_body="figure")
         tex = inj._inject_floats(tex, env="table", kind_body="table")
         tex = inj._inject_floats(tex, env="algorithm", kind_body="algorithm")
         tex = inj._inject_floats(tex, env="algorithm2e", kind_body="algorithm")

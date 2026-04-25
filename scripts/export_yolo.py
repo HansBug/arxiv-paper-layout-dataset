@@ -118,7 +118,7 @@ def yolo_label_lines(
 
     ``class_to_index`` maps active class names to their output YOLO index.
     Annotations whose kind is missing from this map are silently dropped
-    (so passing ``{"fig": 0, "fig_cap": 1}`` produces a 2-class dataset).
+    (so passing ``{"figure": 0, "figure_cap": 1}`` produces a 2-class dataset).
     Defaults to the full 8-class mapping.
     """
     if class_to_index is None:
@@ -304,7 +304,7 @@ def export(
 
 
 def parse_classes(raw: str) -> tuple[str, ...]:
-    """``--classes fig,fig_cap,table,table_cap`` -> ``('fig', ...)``.
+    """``--classes figure,figure_cap,table,table_cap`` -> ``('figure', ...)``.
 
     Preserves user-specified order so indices 0..N-1 in the output
     dataset match the CLI order exactly. Unknown names raise.
