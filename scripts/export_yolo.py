@@ -24,6 +24,15 @@ negative samples (an image paired with an empty ``.txt`` label file).
 YOLO treats these as background examples, which reduces false positives.
 Use ``--skip-negatives`` to drop them instead.
 
+Paper-level filter (spatial-pair, N:1 with containment) is ON by
+default: a paper is kept iff every active body/cap pair is spatially
+valid — every body bbox is mostly contained in some cap bbox, and
+every cap bbox contains at least one body. Orphan body or empty cap
+rejects the paper. This is the user's preferred "clean enough for
+training" gate — it tolerates the common sub-figure pattern that
+strict 1:1 would wrongly throw away. Use ``--strict-1to1`` for the
+smaller strictly-1:1 subset or ``--no-filter`` to export everything.
+
 Image processing:
 - Default output format: JPG (``--format jpg``; ``--format png`` keeps PNG).
 - Default resize policy: if ``min(width, height) > 720``, scale so the
@@ -56,151 +65,20 @@ from pathlib import Path
 
 from PIL import Image
 
+# Shared spatial-pair judgement logic lives in the library so the
+# driver's per-paper broadcast and Monitor B's subset table can apply
+# the exact same predicates.
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "src"))
 
-CLASSES: tuple[str, ...] = (
-    "fig",
-    "fig_cap",
-    "table",
-    "table_cap",
-    "algorithm",
-    "algorithm_cap",
-    "listing",
-    "listing_cap",
+from arxiv_layout.spatial_pair import (  # noqa: E402
+    CLASSES,
+    count_kinds,
+    paper_passes_spatial_pairing,
+    paper_passes_strict_1to1,
 )
+
 CLASS_TO_INDEX = {name: idx for idx, name in enumerate(CLASSES)}
-
-# Body/caption pairs used for the strict-1:1 filter. If the caller limits
-# the export to a subset of classes via ``--classes``, only pairs whose
-# BOTH members are selected are enforced.
-CAPTION_PAIRS: tuple[tuple[str, str], ...] = (
-    ("fig", "fig_cap"),
-    ("table", "table_cap"),
-    ("algorithm", "algorithm_cap"),
-    ("listing", "listing_cap"),
-)
-
-
-def count_kinds(annotations: dict) -> dict[str, int]:
-    """Per-class instance count for a paper's COCO-style ``annotations.json``."""
-    kind_by_cat = {c["id"]: c["name"] for c in annotations.get("categories", [])}
-    out: dict[str, int] = {}
-    for item in annotations.get("annotations", []):
-        name = kind_by_cat.get(item["category_id"])
-        if name is not None:
-            out[name] = out.get(name, 0) + 1
-    return out
-
-
-def _pair_per_page_bboxes(
-    annotations: dict,
-    active_classes: tuple[str, ...],
-):
-    """Yield ``(body_kind, cap_kind, bodies_xywh, caps_xywh)`` per page, per
-    active pair. Pairs whose both members aren't in ``active_classes`` are
-    skipped. Pages with neither body nor cap are skipped.
-    """
-    active = set(active_classes)
-    active_pairs = [(b, c) for b, c in CAPTION_PAIRS
-                    if b in active and c in active]
-    if not active_pairs:
-        return
-    kind_by_cat = {c["id"]: c["name"] for c in annotations.get("categories", [])}
-    per_page: dict[int, dict[str, list]] = {}
-    for item in annotations.get("annotations", []):
-        kind = kind_by_cat.get(item["category_id"])
-        if kind is None:
-            continue
-        per_page.setdefault(item["image_id"], {}).setdefault(kind, []).append(item["bbox"])
-    for page_kinds in per_page.values():
-        for body_kind, cap_kind in active_pairs:
-            bodies = page_kinds.get(body_kind, [])
-            caps = page_kinds.get(cap_kind, [])
-            if not bodies and not caps:
-                continue
-            yield body_kind, cap_kind, bodies, caps
-
-
-def paper_passes_strict_1to1(
-    annotations: dict,
-    active_classes: tuple[str, ...],
-    iou_thresh: float = 0.9,
-) -> bool:
-    """Strict 1:1 with spatial validity:
-
-    - On every page, ``count(body) == count(cap)`` for each active pair.
-    - Every body is mostly contained in some cap, every cap holds >=1
-      body (orphan body / empty cap -> reject).
-    - At least one pair somewhere is non-empty.
-    """
-    any_pair_nonempty = False
-    for body_kind, cap_kind, bodies, caps in _pair_per_page_bboxes(
-        annotations, active_classes
-    ):
-        if len(bodies) != len(caps):
-            return False
-        for bb in bodies:
-            if not any(_body_mostly_inside_cap(bb, cb, iou_thresh) for cb in caps):
-                return False
-        for cb in caps:
-            if not any(_body_mostly_inside_cap(bb, cb, iou_thresh) for bb in bodies):
-                return False
-        any_pair_nonempty = True
-    return any_pair_nonempty
-
-
-def _body_mostly_inside_cap(body_xywh, cap_xywh, thresh: float) -> bool:
-    """True iff ``body`` is mostly contained in ``cap``.
-
-    ``intersection_area / body_area >= thresh``, so a fig bbox that sits
-    cleanly inside its fig_cap bbox (or overshoots it by a small
-    amount) counts as contained.
-    """
-    xa, ya, wa, ha = body_xywh
-    xc, yc, wc, hc = cap_xywh
-    ix0 = max(xa, xc); iy0 = max(ya, yc)
-    ix1 = min(xa + wa, xc + wc); iy1 = min(ya + ha, yc + hc)
-    iw = max(0.0, ix1 - ix0)
-    ih = max(0.0, iy1 - iy0)
-    inter = iw * ih
-    body_area = max(1e-9, wa * ha)
-    return (inter / body_area) >= thresh
-
-
-def paper_passes_spatial_pairing(
-    annotations: dict,
-    active_classes: tuple[str, ...],
-    iou_thresh: float = 0.9,
-) -> bool:
-    """Relaxed alternative to strict 1:1 based on bbox containment.
-
-    For every pair ``(body, cap)`` where BOTH names are in
-    ``active_classes``, on every page:
-
-    - Every ``body`` bbox must be *mostly contained* in some ``cap``
-      bbox on that page (``intersection / body_area >= iou_thresh``).
-      An orphan body (no parent cap) rejects the paper.
-    - Every ``cap`` bbox must have at least one body mostly contained
-      in it. An empty cap (no child body) rejects the paper.
-    - At least one (body, cap) pair must be non-empty *somewhere* in
-      the paper, otherwise there's nothing to learn.
-
-    Unlike :func:`paper_passes_strict_1to1`, per-page counts do not
-    have to match: one ``fig_cap`` enclosing multiple ``fig`` bboxes
-    (the common subfigure pattern) is accepted.
-    """
-    any_pair_nonempty = False
-    for body_kind, cap_kind, bodies, caps in _pair_per_page_bboxes(
-        annotations, active_classes
-    ):
-        for bb in bodies:
-            if not any(_body_mostly_inside_cap(bb, cb, iou_thresh) for cb in caps):
-                return False
-        for cb in caps:
-            if not any(_body_mostly_inside_cap(bb, cb, iou_thresh) for bb in bodies):
-                return False
-        if bodies and caps:
-            any_pair_nonempty = True
-    return any_pair_nonempty
 
 
 def pick_split(stem: str, weights: tuple[int, int, int]) -> str:
@@ -505,24 +383,44 @@ def main() -> int:
         "output dataset follows this order. Default: all 8 classes. "
         f"Valid: {','.join(CLASSES)}",
     )
+    # Paper-level filter. Default is spatial-pair (N:1 with bbox
+    # containment) — the user's preferred "clean-enough-for-training"
+    # gate. Callers pick a stricter (--strict-1to1) or looser
+    # (--no-filter) alternative.
     filter_group = parser.add_mutually_exclusive_group()
     filter_group.add_argument(
         "--strict-1to1",
-        action="store_true",
+        dest="filter_mode",
+        action="store_const",
+        const="strict",
         help="Only keep papers where every active pair is 1:1 AND "
         "spatially valid (same per-page count, every body bbox mostly "
         "inside some cap bbox, every cap bbox holds at least one body). "
-        "Use this for the cleanest possible training subset.",
+        "Smaller but cleanest possible subset.",
     )
     filter_group.add_argument(
         "--spatial-pair",
-        action="store_true",
-        help="Only keep papers where every active pair is spatially "
-        "valid, relaxed to N:1 — one cap can hold multiple bodies, "
-        "which covers the common multi-subfigure pattern. Orphan body "
-        "(not inside any cap) or empty cap (no body inside) still "
-        "rejects the paper. Larger subset than --strict-1to1.",
+        dest="filter_mode",
+        action="store_const",
+        const="spatial",
+        help="[default] Only keep papers where every active pair is "
+        "spatially valid, relaxed to N:1 — one cap can hold multiple "
+        "bodies, which covers the common multi-subfigure pattern. "
+        "Orphan body (not inside any cap) or empty cap (no body "
+        "inside) still rejects the paper. Passed explicitly this flag "
+        "is a no-op (already the default); kept for self-documentation.",
     )
+    filter_group.add_argument(
+        "--no-filter",
+        dest="filter_mode",
+        action="store_const",
+        const="none",
+        help="Disable paper-level filtering — export every paper even "
+        "if its bbox spatial structure is messy. Use this when you "
+        "want to pretrain on the largest possible corpus and deal "
+        "with noise downstream.",
+    )
+    parser.set_defaults(filter_mode="spatial")
     parser.add_argument(
         "--spatial-iou-thresh",
         type=float,
@@ -561,16 +459,16 @@ def main() -> int:
         max_short_side=args.max_short_side,
         jpg_quality=args.jpg_quality,
         active_classes=args.classes,
-        strict_1to1=args.strict_1to1,
-        spatial_pair=args.spatial_pair,
+        strict_1to1=(args.filter_mode == "strict"),
+        spatial_pair=(args.filter_mode == "spatial"),
         spatial_iou_thresh=args.spatial_iou_thresh,
         include_negatives=args.include_negatives,
     )
-    mode = (
-        "strict-1to1" if args.strict_1to1
-        else "spatial-pair" if args.spatial_pair
-        else "all (no filter)"
-    )
+    mode = {
+        "strict": "strict-1to1",
+        "spatial": "spatial-pair (default)",
+        "none": "no-filter",
+    }[args.filter_mode]
     neg_mode = "include-negatives" if args.include_negatives else "skip-negatives"
     print(
         f"[classes] {list(args.classes)}  filter={mode}  "

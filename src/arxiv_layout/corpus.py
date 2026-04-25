@@ -82,6 +82,11 @@ class PaperRecord:
     labels_by_kind: dict[str, int] = field(default_factory=dict)
     box_counts_histogram: dict[str, int] = field(default_factory=dict)  # "{n}" -> count
     workspace: str = ""              # absolute path of per-paper workspace
+    # Spatial-pair qualification per class-subset ("8" / "6" / "4").
+    # Computed once at ingest time so Monitor B can tally subsets from
+    # state.json without re-reading every annotations.json. Empty dict
+    # for FAIL papers and for records written before this field existed.
+    spatial_pair_ok: dict[str, bool] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -92,6 +97,7 @@ class PaperRecord:
         data.setdefault("categories", [])
         data.setdefault("labels_by_kind", {})
         data.setdefault("box_counts_histogram", {})
+        data.setdefault("spatial_pair_ok", {})
         return cls(**data)
 
 

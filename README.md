@@ -332,10 +332,24 @@ monitors on ``driver.log`` + ``state.json``:
    ```
 
    ``scripts/corpus_snapshot.py`` prints one ``SNAPSHOT ...`` line per
-   tick with ``papers_ok`` / ``papers_failed`` / ``kinds`` /
-   ``archives`` / ``archive_coverage=N/20`` /
+   tick with ``papers_total`` / ``papers_ok`` / ``papers_failed`` /
+   ``pages_total`` / ``pages_with_labels`` / ``total_labels`` /
+   ``kinds`` / ``archives`` / ``archive_coverage=N/20`` /
    ``untouched_archives`` / ``top_cats`` / ``fail_reasons`` /
    ``fails_by_cat`` / active ``control``.
+
+   It then prints a **3-column SUBSETS table** showing what the
+   exported dataset would look like under each of three class
+   policies — ``8-label`` (full), ``6-label`` (drop algorithm pair),
+   ``4-label`` (drop algorithm + listing pairs) — after applying the
+   default ``--spatial-pair`` paper-level filter. Rows:
+   ``papers_pass`` / ``pages_total`` / ``pages_no_label`` (pure
+   negative samples) / per-kind instance counts for each of the 8
+   classes. A non-zero count in a class that's not part of a given
+   subset means those instances exist in passing papers but would be
+   dropped at export time under that subset — a useful cross-check.
+   Pass ``--no-subsets`` to skip this block if you only want the
+   one-line SNAPSHOT.
 
    Each tick ⇒ one event ⇒ the agent inspects label / archive /
    failure-reason balance and writes an updated
@@ -393,7 +407,25 @@ python3 scripts/export_yolo.py \
   #   --max-short-side 0                        no resize
   #   --jpg-quality 85                          cheaper JPEG
   #   --symlink                                 dev only (same-format + no resize)
+  #   --classes fig,fig_cap,table,table_cap     subset export (4-class)
+  #   --strict-1to1                             clean subset; 1:1 + containment
+  #   --no-filter                               export every paper
+  #   --skip-negatives                          drop label-free pages
 ```
+
+**Paper-level filter (default = `--spatial-pair`).** A paper is
+exported iff every active body/cap pair is *spatially valid*: every
+body bbox is mostly contained in some cap bbox (≥90% of its area), and
+every cap bbox holds at least one body. Orphan body or empty cap
+rejects the paper. This tolerates the common sub-figure pattern
+(one `fig_cap` enclosing N `fig` bboxes) that strict 1:1 would wrongly
+throw away. `--strict-1to1` shrinks to a 1:1 subset; `--no-filter`
+disables paper-level filtering entirely.
+
+**Pure negative samples (default on).** Pages with no active-class
+annotations are exported with an empty `.txt` label file — YOLO uses
+them as background examples to suppress false positives. Opt out with
+`--skip-negatives`.
 
 Layout:
 

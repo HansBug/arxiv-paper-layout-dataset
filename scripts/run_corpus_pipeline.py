@@ -81,6 +81,9 @@ from arxiv_layout.corpus import (  # noqa: E402
     slug_for_paper,
 )
 from arxiv_layout.pipeline import process_paper  # noqa: E402
+from arxiv_layout.spatial_pair import (  # noqa: E402
+    spatial_pair_qualification,
+)
 
 
 ARXIV_API = "https://export.arxiv.org/api/query"
@@ -392,6 +395,14 @@ def process_candidate(
         ann = _json.loads(ann_path.read_text(encoding="utf-8"))
         pages_with_labels = {a["image_id"] for a in ann["annotations"]}
         rec.pages_with_labels = len(pages_with_labels)
+        # spatial-pair qualification against the 3 canonical subsets.
+        # cheap (no I/O beyond the already-loaded annotations), and
+        # computing it here means Monitor B can tally subsets straight
+        # from state.json without rescanning every workspace.
+        try:
+            rec.spatial_pair_ok = spatial_pair_qualification(ann)
+        except Exception:  # noqa: BLE001
+            rec.spatial_pair_ok = {}
         hist = box_count_per_page(ann)
         rec.box_counts_histogram = {str(k): v for k, v in hist.items()}
 
@@ -553,10 +564,17 @@ class Driver:
             kind_str = ", ".join(
                 f"{k}={v}" for k, v in sorted(rec.labels_by_kind.items())
             ) or "-"
+            if rec.status == STATUS_OK and rec.spatial_pair_ok:
+                sp_tag = "  sp=[" + " ".join(
+                    f"{k}:{'Y' if v else 'N'}"
+                    for k, v in rec.spatial_pair_ok.items()
+                ) + "]"
+            else:
+                sp_tag = ""
             print(
                 f"     {tag}  [{rec.primary_category or '?'}]  "
                 f"pages={rec.pages_total}  "
-                f"labels={rec.labels_total} ({kind_str})",
+                f"labels={rec.labels_total} ({kind_str}){sp_tag}",
                 flush=True,
             )
 

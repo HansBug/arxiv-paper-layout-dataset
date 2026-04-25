@@ -7,15 +7,33 @@ steer the crawler toward underrepresented kinds / archives.
 
 Prints a single ``SNAPSHOT ...`` line with:
 
-- totals (``papers_ok``, ``papers_failed``, ``pages_with_labels``)
+- totals (``papers_total``, ``papers_ok``, ``papers_failed``,
+  ``pages_total``, ``pages_with_labels``, ``total_labels``)
 - ``kinds``                    — full per-class histogram
 - ``archives``                 — driver query-bucket histogram
+- ``archive_coverage``         — e.g. ``20/20``
+- ``untouched_archives``       — archives with zero OK paper
 - ``top_cats``                 — top 10 ``primary_category``
 - ``fail_reasons``             — histogram of failure reasons
 - ``fails_by_cat``             — top 8 primary categories among failures
 - ``control``                  — the currently-loaded control.json
                                  (minus ``note``) so the monitor sees
                                  which interventions are active.
+
+Then, on a separate block, prints a 3-column **SUBSETS** table across
+the three class-sets we care about at training time, applying the
+spatial-pair (N:1 with containment) filter:
+
+- ``8``  = all classes (fig / fig_cap / table / table_cap /
+           algorithm / algorithm_cap / listing / listing_cap)
+- ``6``  = drop algorithm pair (fig / fig_cap / table / table_cap /
+           listing / listing_cap)  — the user's "6 label" meaning
+- ``4``  = drop algorithm + listing (fig / fig_cap / table / table_cap)
+
+For each subset: ``papers_pass`` (passing spatial-pair), ``pages_total``
+(all pages of passing papers), ``pages_without_labels`` (pages of
+passing papers with zero active-class instance — future YOLO negative
+samples), and per-kind instance counts from passing papers.
 
 Usage::
 
@@ -34,11 +52,132 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
 from arxiv_layout.corpus import ARXIV_ARCHIVES  # noqa: E402
+from arxiv_layout.spatial_pair import (  # noqa: E402
+    CLASSES,
+    CLASS_SUBSETS,
+    count_kinds,
+    pages_label_stats,
+    paper_passes_spatial_pairing,
+)
+
+
+def _fmt_cell(v: object) -> str:
+    """Integers right-padded so the 3-column table stays readable."""
+    if isinstance(v, int):
+        return f"{v:>10}"
+    return f"{str(v):>10}"
+
+
+def _compute_subsets(
+    workspaces_root: Path,
+    papers_state: dict,
+) -> dict[str, dict]:
+    """Walk every OK paper's annotations.json, apply spatial-pair for
+    each subset, and accumulate the stats the 3-column table needs.
+
+    ``papers_state`` is ``state.papers`` so we can skip FAIL entries
+    without touching the filesystem; ``spatial_pair_ok`` on the record
+    is also honoured as a fast-path, falling back to a fresh re-check
+    if it's missing (i.e. records ingested before the field existed).
+    """
+    per_subset: dict[str, dict] = {
+        name: {
+            "papers_pass": 0,
+            "pages_total": 0,
+            "pages_without_labels": 0,
+            "kinds": {c: 0 for c in CLASSES},
+        }
+        for name in CLASS_SUBSETS
+    }
+    if not workspaces_root.is_dir():
+        return per_subset
+
+    for arxiv_id, rec in papers_state.items():
+        if rec.get("status") != "ok":
+            continue
+        workspace = rec.get("workspace") or ""
+        if not workspace:
+            continue
+        ann_path = Path(workspace) / "dataset" / "annotations.json"
+        if not ann_path.is_file():
+            continue
+        try:
+            ann = json.loads(ann_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+
+        # cached qualification per subset ("8"/"6"/"4" -> bool)
+        cached = rec.get("spatial_pair_ok") or {}
+        kind_hist = count_kinds(ann)
+
+        for name, classes in CLASS_SUBSETS.items():
+            if name in cached:
+                passes = bool(cached[name])
+            else:
+                passes = paper_passes_spatial_pairing(ann, classes)
+            if not passes:
+                continue
+            bucket = per_subset[name]
+            bucket["papers_pass"] += 1
+            pages_total, pages_without = pages_label_stats(ann, classes)
+            bucket["pages_total"] += pages_total
+            bucket["pages_without_labels"] += pages_without
+            for cls, n in kind_hist.items():
+                if cls in bucket["kinds"]:
+                    bucket["kinds"][cls] += n
+    return per_subset
+
+
+def _print_subset_table(subsets: dict[str, dict]) -> None:
+    """Print a compact three-column text table.
+
+    Row order: a human-facing explanation of each subset's label scope,
+    then the size metrics, then the 8 per-class counts across every
+    paper that PASSES the subset's spatial-pair filter. Kinds that
+    aren't in the subset's active-class list (e.g. ``algorithm*`` under
+    the 6-label subset) still appear: a non-zero cell there means
+    those instances exist in passing papers but would be *dropped* at
+    export time under that subset. That's a useful signal for judging
+    subset trade-offs.
+    """
+    names = list(CLASS_SUBSETS.keys())
+    label_w = 18
+    col_w = 12
+
+    def _row(cells: list[str], right_align_from: int = 1) -> str:
+        out = [cells[0].ljust(label_w)]
+        for cell in cells[1:]:
+            out.append(cell.rjust(col_w))
+        return "  ".join(out)
+
+    print("SUBSETS (spatial-pair N:1 with containment, IoU thresh 0.9)")
+    for name in names:
+        print(f"  {name}-label = {', '.join(CLASS_SUBSETS[name])}")
+    print(_row(["", *[f"{name}-label" for name in names]]))
+    print(_row(["-" * label_w, *["-" * col_w] * len(names)]))
+
+    metrics = [
+        ("papers_pass", "papers_pass"),
+        ("pages_total", "pages_total"),
+        ("pages_no_label", "pages_without_labels"),
+    ]
+    for label, key in metrics:
+        print(_row([label, *[str(subsets[n][key]) for n in names]]))
+
+    print(_row(["-- kinds --", *["" for _ in names]]))
+    for cls in CLASSES:
+        print(_row([cls, *[str(subsets[n]["kinds"][cls]) for n in names]]))
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path("runs/corpus"))
+    parser.add_argument(
+        "--no-subsets",
+        action="store_true",
+        help="skip the 3-column SUBSETS table (useful for lightweight "
+        "polling when you only want the single SNAPSHOT line).",
+    )
     args = parser.parse_args()
 
     state_path = args.root / "state.json"
@@ -107,6 +246,13 @@ def main() -> int:
         "control=" + json.dumps(ctl_summary, ensure_ascii=False),
     ]
     print(" ".join(parts))
+
+    if not args.no_subsets:
+        subsets = _compute_subsets(
+            args.root / "workspaces",
+            state.get("papers", {}) or {},
+        )
+        _print_subset_table(subsets)
     return 0
 
 
