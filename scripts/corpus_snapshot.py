@@ -76,9 +76,16 @@ def _compute_subsets(
     each subset, and accumulate the stats the 3-column table needs.
 
     ``papers_state`` is ``state.papers`` so we can skip FAIL entries
-    without touching the filesystem; ``spatial_pair_ok`` on the record
-    is also honoured as a fast-path, falling back to a fresh re-check
-    if it's missing (i.e. records ingested before the field existed).
+    without touching the filesystem.
+
+    We deliberately do **not** consult the record's cached
+    ``spatial_pair_ok``. That cache is produced by the driver at
+    ingest time, so whenever ``CLASS_SUBSETS`` changes meaning (e.g.
+    the 6-label redefinition from "drop algorithm" to "drop
+    listing") the cache would silently serve stale answers. The full
+    re-check over ~1000 annotations.json finishes in ~10s, well
+    inside Monitor B's 10-minute cadence — cheap enough to skip the
+    fast-path and stay correct by construction.
     """
     per_subset: dict[str, dict] = {
         name: {
@@ -106,15 +113,9 @@ def _compute_subsets(
         except Exception:  # noqa: BLE001
             continue
 
-        # cached qualification per subset ("8"/"6"/"4" -> bool)
-        cached = rec.get("spatial_pair_ok") or {}
         kind_hist = count_kinds(ann)
-
         for name, classes in CLASS_SUBSETS.items():
-            if name in cached:
-                passes = bool(cached[name])
-            else:
-                passes = paper_passes_spatial_pairing(ann, classes)
+            passes = paper_passes_spatial_pairing(ann, classes)
             if not passes:
                 continue
             bucket = per_subset[name]
