@@ -64,6 +64,47 @@ CLASSES: tuple[str, ...] = (
 )
 CLASS_TO_INDEX = {name: idx for idx, name in enumerate(CLASSES)}
 
+# Body/caption pairs used for the strict-1:1 filter. If the caller limits
+# the export to a subset of classes via ``--classes``, only pairs whose
+# BOTH members are selected are enforced.
+CAPTION_PAIRS: tuple[tuple[str, str], ...] = (
+    ("fig", "fig_cap"),
+    ("table", "table_cap"),
+    ("algorithm", "algorithm_cap"),
+    ("listing", "listing_cap"),
+)
+
+
+def count_kinds(annotations: dict) -> dict[str, int]:
+    """Per-class instance count for a paper's COCO-style ``annotations.json``."""
+    kind_by_cat = {c["id"]: c["name"] for c in annotations.get("categories", [])}
+    out: dict[str, int] = {}
+    for item in annotations.get("annotations", []):
+        name = kind_by_cat.get(item["category_id"])
+        if name is not None:
+            out[name] = out.get(name, 0) + 1
+    return out
+
+
+def paper_passes_strict_1to1(
+    kinds: dict[str, int],
+    active_classes: tuple[str, ...],
+) -> bool:
+    """True iff every pair (body, cap) where BOTH are in ``active_classes``
+    has matching counts AND at least one such pair has count > 0."""
+    active = set(active_classes)
+    has_any = False
+    for body, cap in CAPTION_PAIRS:
+        if body not in active or cap not in active:
+            continue
+        b = kinds.get(body, 0)
+        c = kinds.get(cap, 0)
+        if b != c:
+            return False
+        if b > 0:
+            has_any = True
+    return has_any
+
 
 def pick_split(stem: str, weights: tuple[int, int, int]) -> str:
     """Return one of ``train/val/test`` deterministically from ``stem``.
@@ -96,13 +137,22 @@ def build_stem(paper_id: str, page_id: int) -> str:
 def yolo_label_lines(
     annotations: dict,
     image_id_to_size: dict[int, tuple[int, int]],
+    class_to_index: dict[str, int] | None = None,
 ) -> dict[int, list[str]]:
-    """For each page image id, the list of YOLO rows to write."""
+    """For each page image id, the list of YOLO rows to write.
+
+    ``class_to_index`` maps active class names to their output YOLO index.
+    Annotations whose kind is missing from this map are silently dropped
+    (so passing ``{"fig": 0, "fig_cap": 1}`` produces a 2-class dataset).
+    Defaults to the full 8-class mapping.
+    """
+    if class_to_index is None:
+        class_to_index = CLASS_TO_INDEX
     kinds = {c["id"]: c["name"] for c in annotations["categories"]}
     per_image: dict[int, list[str]] = {}
     for item in annotations["annotations"]:
         kind = kinds.get(item["category_id"])
-        if kind is None or kind not in CLASS_TO_INDEX:
+        if kind is None or kind not in class_to_index:
             continue
         x, y, w, h = item["bbox"]
         img_w, img_h = image_id_to_size.get(item["image_id"], (0, 0))
@@ -174,23 +224,37 @@ def export(
     image_format: str = "jpg",
     max_short_side: int = 720,
     jpg_quality: int = 90,
+    active_classes: tuple[str, ...] = CLASSES,
+    strict_1to1: bool = False,
 ) -> dict[str, int]:
     out.mkdir(parents=True, exist_ok=True)
     for subset in ("train", "val", "test"):
         (out / "images" / subset).mkdir(parents=True, exist_ok=True)
         (out / "labels" / subset).mkdir(parents=True, exist_ok=True)
 
+    class_to_index = {name: idx for idx, name in enumerate(active_classes)}
     ext = f".{image_format}"
-    counts: dict[str, int] = {"train": 0, "val": 0, "test": 0, "skipped_no_labels": 0}
+    counts: dict[str, int] = {
+        "train": 0,
+        "val": 0,
+        "test": 0,
+        "skipped_no_labels": 0,
+        "skipped_papers_not_1to1": 0,
+    }
 
     for input_root in inputs:
         for paper_id, ann_path, pages_dir in iter_papers(input_root):
             annotations = json.loads(ann_path.read_text(encoding="utf-8"))
+            if strict_1to1:
+                kinds = count_kinds(annotations)
+                if not paper_passes_strict_1to1(kinds, active_classes):
+                    counts["skipped_papers_not_1to1"] += 1
+                    continue
             size_by_id = {
                 img["id"]: (img["width"], img["height"]) for img in annotations["images"]
             }
             file_by_id = {img["id"]: img["file_name"] for img in annotations["images"]}
-            labels = yolo_label_lines(annotations, size_by_id)
+            labels = yolo_label_lines(annotations, size_by_id, class_to_index)
 
             for image_id, file_name in file_by_id.items():
                 src_img = pages_dir / file_name
@@ -234,13 +298,32 @@ def export(
                 "test: images/test",
                 "",
                 "names:",
-                *[f"  {idx}: {name}" for idx, name in enumerate(CLASSES)],
+                *[f"  {idx}: {name}" for idx, name in enumerate(active_classes)],
                 "",
             ]
         ),
         encoding="utf-8",
     )
     return counts
+
+
+def parse_classes(raw: str) -> tuple[str, ...]:
+    """``--classes fig,fig_cap,table,table_cap`` -> ``('fig', ...)``.
+
+    Preserves user-specified order so indices 0..N-1 in the output
+    dataset match the CLI order exactly. Unknown names raise.
+    """
+    parts = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+    if not parts:
+        raise argparse.ArgumentTypeError("--classes must list at least one class")
+    bad = [p for p in parts if p not in CLASS_TO_INDEX]
+    if bad:
+        raise argparse.ArgumentTypeError(
+            f"--classes unknown names: {bad!r}; valid: {list(CLASSES)}"
+        )
+    if len(set(parts)) != len(parts):
+        raise argparse.ArgumentTypeError(f"--classes has duplicates: {parts!r}")
+    return tuple(parts)
 
 
 def parse_weights(raw: str) -> tuple[int, int, int]:
@@ -296,6 +379,22 @@ def main() -> int:
         default=90,
         help="JPEG quality when --format jpg (default 90)",
     )
+    parser.add_argument(
+        "--classes",
+        type=parse_classes,
+        default=CLASSES,
+        help="comma-separated subset of classes to export; index in the "
+        "output dataset follows this order. Default: all 8 classes. "
+        f"Valid: {','.join(CLASSES)}",
+    )
+    parser.add_argument(
+        "--strict-1to1",
+        action="store_true",
+        help="only include papers where every (body, caption) pair whose "
+        "BOTH members are in --classes has matching counts AND at least "
+        "one such pair is non-empty. Useful for producing a clean training "
+        "subset without caption/body mismatches.",
+    )
     args = parser.parse_args()
 
     counts = export(
@@ -306,7 +405,10 @@ def main() -> int:
         image_format=args.format,
         max_short_side=args.max_short_side,
         jpg_quality=args.jpg_quality,
+        active_classes=args.classes,
+        strict_1to1=args.strict_1to1,
     )
+    print(f"[classes] {list(args.classes)}  (strict_1to1={args.strict_1to1})")
     print(
         f"[done] {sum(v for k, v in counts.items() if k != 'skipped_no_labels')} images "
         f"-> {args.out}"

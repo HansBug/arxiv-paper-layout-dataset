@@ -87,6 +87,33 @@ ARXIV_API = "https://export.arxiv.org/api/query"
 USER_AGENT = "arxiv-paper-layout-dataset/1.0 (continuous-pipeline)"
 RATE_LIMIT_SEC = 3.1
 
+# URL opener used for every arxiv call. Re-built from ``_configure_proxy``
+# when ``--arxiv-proxy`` / ``ARXIV_PROXY`` is set, so outbound traffic
+# tunnels through a residential proxy when arxiv.org is unreachable
+# (e.g. from mainland China IPs). ``None`` = use urllib's default opener.
+_OPENER: urllib.request.OpenerDirector | None = None
+
+
+def _configure_proxy(proxy_url: str | None) -> None:
+    """Install a ProxyHandler for subsequent arxiv API calls.
+
+    Accepts the raw env-var / CLI-arg value; empty string or ``None``
+    disables proxying. The proxy URL is routed for both ``http`` and
+    ``https`` targets.
+    """
+    global _OPENER
+    if not proxy_url:
+        _OPENER = None
+        return
+    _OPENER = urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+    )
+    print(
+        f"[proxy] routing arxiv API through {proxy_url.split('@')[-1]!r} "
+        f"(credentials hidden)",
+        flush=True,
+    )
+
 CONTROL_FILENAME = "control.json"
 
 
@@ -131,9 +158,10 @@ def _arxiv_api_call(url: str, attempts: int = 5, timeout: int = 60) -> bytes:
     """
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     last_exc: Exception | None = None
+    opener = _OPENER or urllib.request.build_opener()
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with opener.open(req, timeout=timeout) as resp:
                 return resp.read()
         except urllib.error.HTTPError as exc:
             last_exc = exc
@@ -217,7 +245,8 @@ def fetch_candidates(
 
 def _download_bytes(url: str, dest: Path, timeout: int = 180) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    opener = _OPENER or urllib.request.build_opener()
+    with opener.open(req, timeout=timeout) as resp:
         payload = resp.read()
     dest.write_bytes(payload)
 
@@ -628,11 +657,21 @@ def parse_args() -> argparse.Namespace:
         "(debugging only; blows up disk)",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--arxiv-proxy",
+        default=os.environ.get("ARXIV_PROXY"),
+        help="HTTP(S) proxy URL for reaching arxiv.org (both metadata API "
+        "and e-print downloads). Takes precedence over ARXIV_PROXY env var. "
+        "Use when arxiv.org is unreachable directly (e.g. from mainland "
+        "China IPs). Example: "
+        "http://user:pass@brd.superproxy.io:33335",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    _configure_proxy(args.arxiv_proxy)
     driver = Driver(args)
     return driver.run()
 
