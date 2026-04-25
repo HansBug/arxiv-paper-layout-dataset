@@ -44,7 +44,13 @@ CLASSES: tuple[str, ...] = (
 # that get printed in dashboards and broadcast lines.
 CLASS_SUBSETS: dict[str, tuple[str, ...]] = {
     "8": CLASSES,
-    "6": ("fig", "fig_cap", "table", "table_cap", "listing", "listing_cap"),
+    # 6-label drops the ``listing`` pair (NOT ``algorithm``). arxiv
+    # papers almost never wrap code in a ``listing`` float, so
+    # ``listing_cap`` is structurally always 0 and keeping ``listing``
+    # in the subset would just reject every paper with a stray
+    # ``lstlisting`` block. ``algorithm`` still matters for ML-flavour
+    # papers where pseudocode is integral.
+    "6": ("fig", "fig_cap", "table", "table_cap", "algorithm", "algorithm_cap"),
     "4": ("fig", "fig_cap", "table", "table_cap"),
 }
 
