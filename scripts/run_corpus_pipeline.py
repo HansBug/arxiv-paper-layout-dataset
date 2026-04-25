@@ -83,7 +83,7 @@ from arxiv_layout.corpus import (  # noqa: E402
 from arxiv_layout.pipeline import process_paper  # noqa: E402
 
 
-ARXIV_API = "http://export.arxiv.org/api/query"
+ARXIV_API = "https://export.arxiv.org/api/query"
 USER_AGENT = "arxiv-paper-layout-dataset/1.0 (continuous-pipeline)"
 RATE_LIMIT_SEC = 3.1
 
