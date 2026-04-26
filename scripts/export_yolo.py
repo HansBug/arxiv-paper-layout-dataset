@@ -792,6 +792,7 @@ def _emit_one(
     max_short_side: int,
     jpg_quality: int,
     ext: str,
+    no_labels: bool = False,
 ) -> dict:
     """Single-page worker: write the image + its YOLO label. Returns a
     partial-result dict for the main thread to fold into ``stats``.
@@ -809,7 +810,9 @@ def _emit_one(
 
     split_dir = SPLIT_DIRS[split]
     dst_img = out / split_dir / "images" / f"{stem}{ext}"
-    dst_lbl = out / split_dir / "labels" / f"{stem}.txt"
+    dst_lbl: Path | None = (
+        None if no_labels else out / split_dir / "labels" / f"{stem}.txt"
+    )
 
     can_symlink = (
         (not copy_images)
@@ -827,9 +830,10 @@ def _emit_one(
             src_img, dst_img, image_format, max_short_side, jpg_quality
         )
 
-    dst_lbl.write_text(
-        ("\n".join(rows) + "\n") if rows else "", encoding="utf-8"
-    )
+    if dst_lbl is not None:
+        dst_lbl.write_text(
+            ("\n".join(rows) + "\n") if rows else "", encoding="utf-8"
+        )
     return {
         "split": split,
         "is_negative": not rows,
@@ -854,6 +858,7 @@ def _emit_candidates(
     active_classes: tuple[str, ...],
     workers: int = 8,
     progress_every: int = 500,
+    no_labels: bool = False,
 ) -> dict:
     """Write images + labels for every candidate in parallel.
 
@@ -931,6 +936,7 @@ def _emit_candidates(
             r = _emit_one(
                 cand, out, copy_images, image_format,
                 max_short_side, jpg_quality, ext,
+                no_labels=no_labels,
             )
             absorb(r)
             if progress_every and i % progress_every == 0:
@@ -948,6 +954,7 @@ def _emit_candidates(
             ex.submit(
                 _emit_one, cand, out, copy_images, image_format,
                 max_short_side, jpg_quality, ext,
+                no_labels,
             )
             for cand in candidates
         ]
@@ -1346,6 +1353,7 @@ def _write_readme(
     max_labels_per_paper: int,
     has_preview: bool,
     has_archive_class: bool,
+    no_labels: bool = False,
 ) -> None:
     total_images = sum(stats["splits"].values())
     total_labels = len(stats["bbox_sizes"])
@@ -1353,7 +1361,9 @@ def _write_readme(
     pages_neg = sum(1 for n in stats["labels_per_image"] if n == 0)
 
     lines: list[str] = []
-    lines.append("# arxiv-paper-layout YOLO export")
+    title = "arxiv-paper-layout image export (unlabeled)" if no_labels \
+        else "arxiv-paper-layout YOLO export"
+    lines.append(f"# {title}")
     lines.append("")
     lines.append(
         f"_Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}_"
@@ -1362,10 +1372,22 @@ def _write_readme(
     lines.append(f"**Generator command**:  `{args_repr}`")
     lines.append("")
 
+    if no_labels:
+        lines.append(
+            "> **Unlabeled export.** Only page images are shipped — there "
+            "is no `labels/` directory and no `train_recommended.yaml`. "
+            "Use this slice as an annotation pool (e.g. upload to a "
+            "Roboflow project for hand- or model-assisted labelling)."
+        )
+        lines.append("")
+
     # 1. At a glance
     lines.append("## 1. At a glance")
     lines.append("")
-    lines.append(f"- **classes (output index order)**: {list(active_classes)}")
+    if not no_labels:
+        lines.append(
+            f"- **classes (output index order)**: {list(active_classes)}"
+        )
     lines.append(
         f"- **paper-level filter**: `{filter_mode}` "
         f"(IoU thresh {spatial_iou_thresh})"
@@ -1396,14 +1418,23 @@ def _write_readme(
         f"**archives covered**: {len(stats['archives'])}"
     )
     lines.append("")
-    lines.append("| split | pages | positive | negative |")
-    lines.append("|---|---:|---:|---:|")
-    for split in ("train", "val", "test"):
-        lines.append(_split_table_row(stats, split))
-    lines.append(
-        f"| **all** | **{total_images}** | "
-        f"**{pages_with_labels}** | **{pages_neg}** |"
-    )
+    if no_labels:
+        lines.append("| split | pages |")
+        lines.append("|---|---:|")
+        for split in ("train", "val", "test"):
+            lines.append(
+                f"| {split} | {stats['splits'].get(split, 0)} |"
+            )
+        lines.append(f"| **all** | **{total_images}** |")
+    else:
+        lines.append("| split | pages | positive | negative |")
+        lines.append("|---|---:|---:|---:|")
+        for split in ("train", "val", "test"):
+            lines.append(_split_table_row(stats, split))
+        lines.append(
+            f"| **all** | **{total_images}** | "
+            f"**{pages_with_labels}** | **{pages_neg}** |"
+        )
     lines.append("")
 
     if has_preview:
@@ -1417,20 +1448,25 @@ def _write_readme(
         lines.append("![preview](analysis/preview.png)")
         lines.append("")
 
-    # 2. Per-class counts
-    lines.append("## 2. Per-class label counts")
-    lines.append("")
-    lines.append("| class | train | val | test | total |")
-    lines.append("|---|---:|---:|---:|---:|")
-    for name in active_classes:
-        tr = stats["classes_per_split"]["train"].get(name, 0)
-        va = stats["classes_per_split"]["val"].get(name, 0)
-        te = stats["classes_per_split"]["test"].get(name, 0)
-        lines.append(f"| `{name}` | {tr} | {va} | {te} | **{tr + va + te}** |")
-    lines.append(f"| **all classes** |  |  |  | **{total_labels}** |")
-    lines.append("")
-    lines.append("![class counts](analysis/class_counts.png)")
-    lines.append("")
+    # 2. Per-class counts (label-derived; skipped in --no-labels mode)
+    if not no_labels:
+        lines.append("## 2. Per-class label counts")
+        lines.append("")
+        lines.append("| class | train | val | test | total |")
+        lines.append("|---|---:|---:|---:|---:|")
+        for name in active_classes:
+            tr = stats["classes_per_split"]["train"].get(name, 0)
+            va = stats["classes_per_split"]["val"].get(name, 0)
+            te = stats["classes_per_split"]["test"].get(name, 0)
+            lines.append(
+                f"| `{name}` | {tr} | {va} | {te} | **{tr + va + te}** |"
+            )
+        lines.append(
+            f"| **all classes** |  |  |  | **{total_labels}** |"
+        )
+        lines.append("")
+        lines.append("![class counts](analysis/class_counts.png)")
+        lines.append("")
 
     # 3. Archive coverage
     lines.append("## 3. Archive coverage")
@@ -1452,37 +1488,39 @@ def _write_readme(
         lines.append("![archive×class](analysis/archive_class.png)")
         lines.append("")
 
-    # 4. Spatial / size analytics
-    lines.append("## 4. BBox spatial distribution")
-    lines.append("")
-    lines.append(
-        "Heatmap of bbox centers on a page-normalised canvas. Origin "
-        "is top-left and y grows downward to match image coordinates, "
-        "so pages have visually the same orientation as the rendered PDF."
-    )
-    lines.append("")
-    lines.append("![bbox centers](analysis/bbox_centers.png)")
-    lines.append("")
-    lines.append("## 5. BBox size distribution")
-    lines.append("")
-    lines.append(
-        "Per-class histograms of `area / page_area`. Most floats sit "
-        "below 40% of the page; the long tail above 70% is dominated "
-        "by full-page tables / figures and is rare."
-    )
-    lines.append("")
-    lines.append("![bbox size](analysis/bbox_size.png)")
-    lines.append("")
-    lines.append("## 6. BBox aspect ratio (w/h)")
-    lines.append("")
-    lines.append(
-        "Anchor-box / detector hint: tables typically peak in the "
-        "*very-wide* band (>2.5), figures cluster around 1.0–2.0, "
-        "and `tall` boxes (<0.4) are rare across the corpus."
-    )
-    lines.append("")
-    lines.append("![bbox aspect](analysis/bbox_aspect.png)")
-    lines.append("")
+    # 4-6. Bbox-derived sections — skipped in --no-labels mode.
+    if not no_labels:
+        lines.append("## 4. BBox spatial distribution")
+        lines.append("")
+        lines.append(
+            "Heatmap of bbox centers on a page-normalised canvas. "
+            "Origin is top-left and y grows downward to match image "
+            "coordinates, so pages have visually the same orientation "
+            "as the rendered PDF."
+        )
+        lines.append("")
+        lines.append("![bbox centers](analysis/bbox_centers.png)")
+        lines.append("")
+        lines.append("## 5. BBox size distribution")
+        lines.append("")
+        lines.append(
+            "Per-class histograms of `area / page_area`. Most floats "
+            "sit below 40% of the page; the long tail above 70% is "
+            "dominated by full-page tables / figures and is rare."
+        )
+        lines.append("")
+        lines.append("![bbox size](analysis/bbox_size.png)")
+        lines.append("")
+        lines.append("## 6. BBox aspect ratio (w/h)")
+        lines.append("")
+        lines.append(
+            "Anchor-box / detector hint: tables typically peak in the "
+            "*very-wide* band (>2.5), figures cluster around 1.0–2.0, "
+            "and `tall` boxes (<0.4) are rare across the corpus."
+        )
+        lines.append("")
+        lines.append("![bbox aspect](analysis/bbox_aspect.png)")
+        lines.append("")
     lines.append("## 7. Page aspect ratio")
     lines.append("")
     lines.append(
@@ -1492,69 +1530,74 @@ def _write_readme(
     lines.append("")
     lines.append("![page aspect](analysis/page_aspect.png)")
     lines.append("")
-    lines.append("## 8. Labels per page")
-    lines.append("")
-    lines.append(
-        "Distribution of `labels_per_image` across the export. A wide "
-        "left peak at zero is expected: most pages of a paper are "
-        "text-only, kept here as YOLO background examples."
-    )
-    lines.append("")
-    lines.append("![labels per image](analysis/labels_per_image.png)")
-    lines.append("")
+    if not no_labels:
+        lines.append("## 8. Labels per page")
+        lines.append("")
+        lines.append(
+            "Distribution of `labels_per_image` across the export. "
+            "A wide left peak at zero is expected: most pages of a "
+            "paper are text-only, kept here as YOLO background "
+            "examples."
+        )
+        lines.append("")
+        lines.append("![labels per image](analysis/labels_per_image.png)")
+        lines.append("")
 
     # 9. Layout
     lines.append("## 9. Filesystem layout")
     lines.append("")
     lines.append("```")
     lines.append(f"{out.name}/")
-    lines.append("  data.yaml                # ultralytics YOLO data spec")
-    lines.append("  train_recommended.yaml   # ready-to-use ultralytics train cfg")
+    if no_labels:
+        lines.append("  data.yaml                # class schema (no labels emitted)")
+    else:
+        lines.append("  data.yaml                # ultralytics YOLO data spec")
+        lines.append("  train_recommended.yaml   # ready-to-use ultralytics train cfg")
     lines.append("  dataset_meta.json        # structured metadata")
     lines.append("  manifest.sha256          # file integrity manifest")
     lines.append("  README.md                # this file")
     lines.append("  analysis/                # auto-generated diagnostic plots")
-    lines.append("    class_counts.png")
-    lines.append("    archive_class.png")
-    lines.append("    bbox_centers.png")
-    lines.append("    bbox_size.png")
-    lines.append("    bbox_aspect.png")
+    if not no_labels:
+        lines.append("    class_counts.png")
+        lines.append("    archive_class.png")
+        lines.append("    bbox_centers.png")
+        lines.append("    bbox_size.png")
+        lines.append("    bbox_aspect.png")
     lines.append("    page_aspect.png")
-    lines.append("    labels_per_image.png")
-    lines.append("    preview.png")
-    lines.append(
-        f"  train/images/<paper_id>__page_NNN.{image_format}"
-    )
-    lines.append("  train/labels/<paper_id>__page_NNN.txt")
-    lines.append(
-        f"  valid/images/<paper_id>__page_NNN.{image_format}"
-    )
-    lines.append("  valid/labels/<paper_id>__page_NNN.txt")
-    lines.append(
-        f"  test/images/<paper_id>__page_NNN.{image_format}"
-    )
-    lines.append("  test/labels/<paper_id>__page_NNN.txt")
+    if not no_labels:
+        lines.append("    labels_per_image.png")
+        lines.append("    preview.png")
+    for split_dir in ("train", "valid", "test"):
+        lines.append(
+            f"  {split_dir}/images/<paper_id>__page_NNN.{image_format}"
+        )
+        if not no_labels:
+            lines.append(
+                f"  {split_dir}/labels/<paper_id>__page_NNN.txt"
+            )
     lines.append("```")
     lines.append("")
 
-    # 10. Train command
-    lines.append("## 10. Train command")
-    lines.append("")
-    lines.append(
-        "Pre-baked Ultralytics config sits at `train_recommended.yaml`. "
-        "To kick off training:"
-    )
-    lines.append("")
-    lines.append("```bash")
-    lines.append("yolo train cfg=train_recommended.yaml")
-    lines.append("```")
-    lines.append("")
-    lines.append(
-        "The config presets `imgsz=1280`, mosaic on, vertical-flip off, "
-        "and class weights tuned to the per-class frequency in this "
-        "export. Override anything via `key=value` on the CLI."
-    )
-    lines.append("")
+    # 10. Train command (only meaningful with labels).
+    if not no_labels:
+        lines.append("## 10. Train command")
+        lines.append("")
+        lines.append(
+            "Pre-baked Ultralytics config sits at "
+            "`train_recommended.yaml`. To kick off training:"
+        )
+        lines.append("")
+        lines.append("```bash")
+        lines.append("yolo train cfg=train_recommended.yaml")
+        lines.append("```")
+        lines.append("")
+        lines.append(
+            "The config presets `imgsz=1280`, mosaic on, vertical-"
+            "flip off, and class weights tuned to the per-class "
+            "frequency in this export. Override anything via "
+            "`key=value` on the CLI."
+        )
+        lines.append("")
 
     # 11. Provenance
     lines.append("## 11. Provenance & caveats")
@@ -1573,32 +1616,41 @@ def _write_readme(
         f"- `paper-level filter = {filter_mode}` rejects papers whose "
         "bbox structure violates the body/cap spatial pairing rule."
     )
-    if min_bbox_area > 0:
+    if min_bbox_area > 0 and not no_labels:
         lines.append(
             f"- `min_bbox_area = {min_bbox_area}` strips bboxes below "
-            "this fraction of the page area (kills artifact-tiny boxes)."
+            "this fraction of the page area (kills artifact-tiny "
+            "boxes)."
         )
-    lines.append(
-        "- The ``_cap`` suffix is a misnomer kept for historical "
-        "reasons: ``figure_cap`` / ``table_cap`` / etc. are NOT "
-        "caption-text bboxes. Each is the **whole-float bbox** — it "
-        "covers the entire float region from the first body element "
-        "down through the caption (or vice versa for caption-on-top "
-        "floats). One per float, regardless of how many subfigures it "
-        "contains."
-    )
-    lines.append(
-        "- Body boxes (``figure`` / ``table`` / ``algorithm`` / "
-        "``listing``) are per-content-element. A multi-subfigure "
-        "float contributes one ``figure`` box per ``\\includegraphics``, "
-        "all of them spatially contained in the single ``figure_cap`` "
-        "whole-float bbox."
-    )
-    lines.append(
-        "- Boxes are clipped into [0, 1] on emission; `cx / cy / nw / "
-        "nh` are normalised to the *saved* image (post-resize) per the "
-        "Ultralytics convention."
-    )
+    if not no_labels:
+        lines.append(
+            "- The ``_cap`` suffix is a misnomer kept for historical "
+            "reasons: ``figure_cap`` / ``table_cap`` / etc. are NOT "
+            "caption-text bboxes. Each is the **whole-float bbox** — "
+            "it covers the entire float region from the first body "
+            "element down through the caption (or vice versa for "
+            "caption-on-top floats). One per float, regardless of how "
+            "many subfigures it contains."
+        )
+        lines.append(
+            "- Body boxes (``figure`` / ``table`` / ``algorithm`` / "
+            "``listing``) are per-content-element. A multi-subfigure "
+            "float contributes one ``figure`` box per "
+            "``\\includegraphics``, all of them spatially contained "
+            "in the single ``figure_cap`` whole-float bbox."
+        )
+        lines.append(
+            "- Boxes are clipped into [0, 1] on emission; `cx / cy / "
+            "nw / nh` are normalised to the *saved* image (post-"
+            "resize) per the Ultralytics convention."
+        )
+    else:
+        lines.append(
+            "- This export contains images only. The class schema "
+            "(in ``data.yaml`` and ``dataset_meta.json``) reflects "
+            "what the upstream filter would have kept; downstream "
+            "labelling tools can adopt or override it."
+        )
     lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -1624,12 +1676,14 @@ def _write_dataset_meta(
     kinds: list[str] | None = None,
     mode: str = "both",
     filter_classes: tuple[str, ...] | None = None,
+    no_labels: bool = False,
 ) -> None:
     payload = {
         "schema_version": 1,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "git_commit": _git_commit_short(),
         "generator_command": args_repr,
+        "unlabeled": no_labels,
         "classes": list(active_classes),
         "kinds": list(kinds) if kinds else None,
         "mode": mode,
@@ -1778,7 +1832,8 @@ def _write_manifest(
     files: list[Path] = []
     for entry in stats["saved_files"]:
         for p in (entry["image"], entry["label"]):
-            if p in seen:
+            # entry["label"] is None in --no-labels exports.
+            if p is None or p in seen:
                 continue
             seen.add(p)
             files.append(p)
@@ -1819,15 +1874,23 @@ def _write_manifest(
     )
 
 
-def verify_dataset(out: Path, num_classes: int) -> tuple[int, int, list[str]]:
+def verify_dataset(
+    out: Path,
+    num_classes: int,
+    expect_labels: bool = True,
+) -> tuple[int, int, list[str]]:
     """Walk the emitted dataset and return ``(images, issues, sample_msgs)``.
 
     Checks performed:
-    - every label file has a matching image file
-    - every label row parses as ``<int> <float> <float> <float> <float>``
-    - class index in [0, num_classes)
-    - all coords in [0, 1]
     - every image opens via PIL
+    - (only when ``expect_labels=True``) every image has a matching label
+      file, every label row parses as ``<int> <float> <float> <float>
+      <float>``, class index is in ``[0, num_classes)``, and coords are
+      in ``[0, 1]``.
+
+    With ``expect_labels=False`` (i.e. ``--no-labels`` exports) the
+    label-existence and label-content checks are skipped — there is no
+    ``labels/`` directory in that mode.
     """
     issues: list[str] = []
     img_count = 0
@@ -1842,15 +1905,18 @@ def verify_dataset(out: Path, num_classes: int) -> tuple[int, int, list[str]]:
                 continue
             img_count += 1
             stem = img.stem
-            lbl = lbl_dir / f"{stem}.txt"
-            if not lbl.is_file():
-                issues.append(f"missing label: {img.relative_to(out)}")
-                continue
+            if expect_labels:
+                lbl = lbl_dir / f"{stem}.txt"
+                if not lbl.is_file():
+                    issues.append(f"missing label: {img.relative_to(out)}")
+                    continue
             try:
                 with Image.open(img) as im:
                     im.verify()
             except Exception as exc:
                 issues.append(f"image broken: {img.relative_to(out)} ({exc})")
+                continue
+            if not expect_labels:
                 continue
             try:
                 txt = lbl.read_text(encoding="utf-8").strip()
@@ -1903,18 +1969,25 @@ def write_dataset_card(
     min_bbox_area: float,
     max_pages_per_paper: int,
     max_labels_per_paper: int,
+    no_labels: bool = False,
 ) -> None:
     analysis = out / "analysis"
     analysis.mkdir(parents=True, exist_ok=True)
-    _save_class_counts(analysis / "class_counts.png", stats, active_classes)
-    _save_bbox_centers(analysis / "bbox_centers.png", stats, active_classes)
-    _save_bbox_aspect(analysis / "bbox_aspect.png", stats, active_classes)
-    _save_bbox_size(analysis / "bbox_size.png", stats, active_classes)
+
+    # Plots that need bbox / class instances are skipped in --no-labels
+    # mode (they have nothing to render and several would crash on the
+    # empty stats arrays).
+    if not no_labels:
+        _save_class_counts(analysis / "class_counts.png", stats, active_classes)
+        _save_bbox_centers(analysis / "bbox_centers.png", stats, active_classes)
+        _save_bbox_aspect(analysis / "bbox_aspect.png", stats, active_classes)
+        _save_bbox_size(analysis / "bbox_size.png", stats, active_classes)
+        _save_labels_per_image(analysis / "labels_per_image.png", stats)
     _save_page_aspect(analysis / "page_aspect.png", stats)
-    _save_labels_per_image(analysis / "labels_per_image.png", stats)
 
     has_archive_class = (
-        len(stats["archive_x_class"]) > 0
+        not no_labels
+        and len(stats["archive_x_class"]) > 0
         and any(stats["archive_x_class"].values())
     )
     if has_archive_class:
@@ -1922,7 +1995,10 @@ def write_dataset_card(
             analysis / "archive_class.png", stats, active_classes
         )
 
-    has_preview = bool(stats["saved_files"])
+    # Preview mosaic overlays bboxes and labels; without those it would
+    # be a plain thumbnail tile that says nothing the file listing
+    # doesn't already say. Skip in --no-labels.
+    has_preview = (not no_labels) and bool(stats["saved_files"])
     if has_preview:
         try:
             _save_preview_mosaic(
@@ -1951,6 +2027,7 @@ def write_dataset_card(
         max_labels_per_paper,
         has_preview=has_preview,
         has_archive_class=has_archive_class,
+        no_labels=no_labels,
     )
 
 
@@ -1990,8 +2067,17 @@ def export(
     filter_classes: tuple[str, ...] | None = None,
     kinds: list[str] | None = None,
     mode: str = "both",
+    no_labels: bool = False,
 ) -> dict[str, int]:
-    """Orchestrate the full export."""
+    """Orchestrate the full export.
+
+    With ``no_labels=True`` the pipeline runs identically up to the
+    write step, but label .txt files and the per-split ``labels/``
+    directories are skipped, ``train_recommended.yaml`` and label-
+    derived analysis plots are omitted, and ``dataset_meta.json`` is
+    tagged ``"unlabeled": true``. The README writer is fed the same
+    flag and elides every bbox/class section.
+    """
     out.mkdir(parents=True, exist_ok=True)
     # Clean any leftover images/labels from a previous (possibly aborted)
     # run into the same output dir. Without this, an interrupted run
@@ -2010,7 +2096,16 @@ def export(
                     shutil.rmtree(d)
     for split in ("train", "val", "test"):
         split_dir = SPLIT_DIRS[split]
-        for kind in ("images", "labels"):
+        # In --no-labels mode the labels/ subdir is intentionally absent —
+        # don't even create it (still wipe an existing one so re-runs of
+        # the same out dir don't leak leftover txts from a prior labeled
+        # export).
+        kinds_to_create = ("images",) if no_labels else ("images", "labels")
+        if no_labels:
+            d_lbl = out / split_dir / "labels"
+            if d_lbl.exists():
+                shutil.rmtree(d_lbl)
+        for kind in kinds_to_create:
             d = out / split_dir / kind
             if d.exists():
                 shutil.rmtree(d)
@@ -2098,6 +2193,7 @@ def export(
         counts,
         active_classes,
         workers=workers,
+        no_labels=no_labels,
     )
 
     # Per-split per-class counts (emit only fills aggregates).
@@ -2133,7 +2229,10 @@ def export(
         encoding="utf-8",
     )
 
-    if write_train_yaml:
+    # train_recommended.yaml is training-specific and computes class
+    # weights from per-class label counts. In --no-labels mode there
+    # are no labels to weight, so skip it unconditionally.
+    if write_train_yaml and not no_labels:
         _write_train_yaml(
             out / "train_recommended.yaml",
             out,
@@ -2161,6 +2260,7 @@ def export(
             min_bbox_area,
             max_pages_per_paper,
             max_labels_per_paper,
+            no_labels=no_labels,
         )
 
     if write_meta:
@@ -2184,11 +2284,14 @@ def export(
             kinds=kinds,
             mode=mode,
             filter_classes=filter_classes,
+            no_labels=no_labels,
         )
 
     if do_verify:
         img_n, issues_n, sample_msgs = verify_dataset(
-            out, num_classes=len(active_classes)
+            out,
+            num_classes=len(active_classes),
+            expect_labels=not no_labels,
         )
         counts["verify_issues"] = issues_n
         if issues_n:
@@ -2431,6 +2534,21 @@ def main() -> int:
     )
 
     parser.add_argument(
+        "--no-labels",
+        dest="no_labels",
+        action="store_true",
+        default=False,
+        help="Export images only (no YOLO label .txt files, no labels/ "
+        "directory). README skips bbox/class sections, "
+        "train_recommended.yaml is omitted, label-derived analysis "
+        "plots are skipped, and dataset_meta.json is tagged with "
+        "`\"unlabeled\": true`. Useful for shipping a pool of pages "
+        "to be hand-annotated downstream (e.g. into a Roboflow "
+        "project). Sampling / paper-level filter / negative ratio "
+        "still work — pair with `--sample 500 --no-filter` for an "
+        "unlabeled, unfiltered slice.",
+    )
+    parser.add_argument(
         "--no-readme",
         dest="write_readme",
         action="store_false",
@@ -2548,6 +2666,7 @@ def main() -> int:
         write_meta=args.write_meta,
         write_manifest=args.write_manifest,
         do_verify=args.do_verify,
+        no_labels=args.no_labels,
         corpus_state=args.corpus_state,
         args_repr=args_repr,
         min_bbox_area=args.min_bbox_area,

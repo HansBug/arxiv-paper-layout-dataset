@@ -1,3 +1,6 @@
+# local secrets (HF_TOKEN, FEISHU_WEBHOOK overrides, etc.) — never push
+.env
+.env.*
 runs/
 __pycache__/
 *.pyc
