@@ -58,14 +58,15 @@ nohup python3 -u scripts/run_corpus_pipeline.py \
 python3 scripts/corpus_stats.py --state runs/corpus/state.json --top 20
 tail -f runs/corpus/driver.log
 
-# Any time -- or at the end -- turn the corpus into a YOLO dataset:
+# Any time -- or at the end -- turn the corpus into a YOLO dataset.
+# Default is figure+table (4 classes) with full Roboflow-style layout
+# + analysis plots + train_recommended.yaml + dataset_meta.json.
 python3 scripts/export_yolo.py \
   --input runs/corpus/workspaces \
   --out   runs/corpus/yolo \
-  --split 8:1:1 \
-  --format jpg \
-  --max-short-side 720
-# dataset/data.yaml ready for Ultralytics ``yolo train data=... model=yolov8s.pt``
+  --kinds figure,table --mode both \
+  --neg-ratio 0.3 --workers 32
+# Then:  cd runs/corpus/yolo && yolo train cfg=train_recommended.yaml
 ```
 
 Skip-the-queue mode (you only want the small 51-paper seed corpus rather
@@ -383,72 +384,175 @@ monitors on ``driver.log`` + ``state.json``:
 
 ## Export to Ultralytics YOLO format
 
-`scripts/export_yolo.py` turns any pipeline output tree(s) -- the
+`scripts/export_yolo.py` turns any pipeline output tree(s) — the
 seed `runs/v2_validated/` + `runs/v2_extra/` or the live
-`runs/corpus/workspaces/` -- into a ready-to-train Ultralytics YOLO
-dataset. Images are converted to **JPG with short-side <= 720 pt**
-by default so the dataset can ship to a remote training host; use
-`--format png` or `--max-short-side 0` to override.
+`runs/corpus/workspaces/` — into a ready-to-train Ultralytics YOLO
+dataset, complete with diagnostic plots, structured metadata,
+integrity manifest, and a recommended training config. Images are
+converted to **JPG with short-side ≤ 1024 px** by default so figure /
+table boxes that occupy 5–10 % of the page are still ~50 px after
+resize (healthy for YOLO small-object recall). Use `--format png` or
+`--max-short-side 0` to override.
 
 The default 8:1:1 split is **deterministic**: the sample's filename
 stem embeds both `arxiv_id` and `page_id`, and its split is picked
 by `sha256(stem) % 10` → 0-7 train / 8 val / 9 test. Same stem always
 lands in the same split, even across re-runs or on a different host.
 
+### Quickstart
+
 ```bash
+# 100-image smoke slice (4 classes, balanced sampling, full diagnostic card)
 python3 scripts/export_yolo.py \
   --input runs/corpus/workspaces \
-  --out   runs/corpus/yolo
+  --out   runs/yolo_smoke \
+  --kinds figure,table --mode both \
+  --sample 100
 
-  # optional:
-  #   --input runs/v2_validated runs/v2_extra   multiple source trees
-  #   --split 7:2:1                             override the ratio
-  #   --format png                              keep PNG
-  #   --max-short-side 0                        no resize
-  #   --jpg-quality 85                          cheaper JPEG
-  #   --symlink                                 dev only (same-format + no resize)
-  #   --classes figure,figure_cap,table,table_cap     subset export (4-class)
-  #   --strict-1to1                             clean subset; 1:1 + containment
-  #   --no-filter                               export every paper
-  #   --skip-negatives                          drop label-free pages
+# Full 4-class export with 30% negative pages (recommended for training)
+python3 scripts/export_yolo.py \
+  --input runs/corpus/workspaces \
+  --out   runs/yolo_full_4label \
+  --kinds figure,table --mode both \
+  --neg-ratio 0.3 --workers 32
+
+# 6-class export (figure + table + algorithm pairs)
+python3 scripts/export_yolo.py \
+  --input runs/corpus/workspaces \
+  --out   runs/yolo_full_6label \
+  --kinds figure,table,algorithm --mode both \
+  --neg-ratio 0.3 --workers 32
+
+# Cap-only ablation: train a "where are the captions" detector
+python3 scripts/export_yolo.py \
+  --input runs/corpus/workspaces \
+  --out   runs/yolo_cap_only \
+  --kinds figure,table --mode cap-only \
+  --neg-ratio 0.3 --workers 32
 ```
 
-**Paper-level filter (default = `--spatial-pair`).** A paper is
-exported iff every active body/cap pair is *spatially valid*: every
-body bbox is mostly contained in some cap bbox (≥90% of its area), and
-every cap bbox holds at least one body. Orphan body or empty cap
-rejects the paper. This tolerates the common sub-figure pattern
-(one `figure_cap` enclosing N `figure` bboxes) that strict 1:1 would wrongly
-throw away. `--strict-1to1` shrinks to a 1:1 subset; `--no-filter`
-disables paper-level filtering entirely.
+### Class selection — `--kinds` × `--mode`
 
-**Pure negative samples (default on).** Pages with no active-class
-annotations are exported with an empty `.txt` label file — YOLO uses
-them as background examples to suppress false positives. Opt out with
-`--skip-negatives`.
+| flag                  | values                                | meaning                                                   |
+|-----------------------|---------------------------------------|-----------------------------------------------------------|
+| `--kinds`             | `figure` / `table` / `algorithm` / `listing`, comma-separated | Which kind families to include (default `figure,table`)    |
+| `--mode`              | `both` / `box-only` / `cap-only`      | Output body, body+cap, or cap only (default `both`)        |
+| `--subset 4\|6\|8`    | `4` / `6` / `8`                       | Legacy shorthand: `4` = `figure,table`, `6` = `+algorithm`, `8` = `+listing`, all `mode=both`. Mutually exclusive with `--kinds`. |
+| `--classes <a,b,c>`   | exact class list                      | Escape hatch — list exact class names; bypasses kinds/mode |
 
-Layout:
+Spatial-pair sanity (paper-level filter) **always** uses the full
+`(body, cap)` pair set, even in `box-only` / `cap-only` mode, so the
+structural body-in-cap check is never weakened by an output choice.
+
+### Sampling — when you only want a slice
+
+| flag                | default        | meaning                                                                      |
+|---------------------|----------------|------------------------------------------------------------------------------|
+| `--sample N`        | `0`            | Cap output to `N` images. `0` = full export.                                 |
+| `--sample-strategy` | `balanced`     | `balanced` / `class-balanced` / `by-archive` / `random`                      |
+| `--sample-seed`     | `0`            | RNG seed for sampling shuffles (deterministic)                               |
+| `--neg-ratio`       | `null`         | Target fraction of negative pages, e.g. `0.3` → 30 % negs. Works with or without `--sample`. |
+
+Strategies:
+
+- **`balanced`** (default) — round-robin by archive, prefer rarer-class
+  pages first. Even tiny samples surface algorithm/listing pages instead
+  of being dominated by figure-only pages.
+- **`class-balanced`** — assign per-class hard quotas. Use this when a
+  rare class (e.g. `algorithm`) must be guaranteed in the sample.
+- **`by-archive`** — pure round-robin across archives, no class bias.
+- **`random`** — deterministic shuffle by `--sample-seed`.
+
+### Quality / dedup filters
+
+| flag                       | default   | meaning                                                                       |
+|----------------------------|-----------|-------------------------------------------------------------------------------|
+| `--max-pages-per-paper N`  | `30`      | Cap pages contributed by any one paper. Stops PhD theses from dominating.     |
+| `--max-labels-per-paper N` | `200`     | Reject papers whose total label count exceeds this (above 99th percentile).   |
+| `--min-bbox-area FRAC`     | `0.0005`  | Drop bboxes < 0.05 % of page area (artifact-tiny boxes from edge cases).      |
+
+Pass `0` to disable any of the above.
+
+### Paper-level filter
+
+| flag             | meaning                                                                                              |
+|------------------|------------------------------------------------------------------------------------------------------|
+| `--spatial-pair` | **Default.** Every body/cap pair must be spatially valid (≥ 90 % body-in-cap; orphan rejects paper). |
+| `--strict-1to1`  | Same plus `count(body) == count(cap)` per page. Smallest, cleanest subset.                           |
+| `--no-filter`    | Export every paper regardless of bbox structure.                                                     |
+
+### Performance / parallelism
+
+| flag                 | default                    | meaning                                                                   |
+|----------------------|----------------------------|---------------------------------------------------------------------------|
+| `--workers N`        | `min(16, cpu_count)`       | Worker threads for candidate scan + image emit + manifest hashing. PIL releases the GIL on heavy ops, so threads scale near-linearly until I/O saturates. |
+| `--symlink`          | off                        | Dev-only — symlink images instead of copying. Requires same format + no resize. |
+
+### Negative samples
+
+Pages with no active-class annotations land in the dataset as **pure
+negatives** (empty `.txt` label) by default — YOLO uses them as
+background examples to suppress false positives. Use `--skip-negatives`
+to drop them entirely, or `--neg-ratio 0.3` to downsample so negatives
+end up at 30 % of the final dataset (recommended for training).
+
+### Output layout (Roboflow-style)
 
 ```
 <out>/
-  data.yaml                           # class names + split paths
-  images/{train,val,test}/<paper_id>__page_<NNN>.jpg
-  labels/{train,val,test}/<paper_id>__page_<NNN>.txt
+  data.yaml                  # class names + relative split paths
+  train_recommended.yaml     # ready-to-run Ultralytics training config
+  dataset_meta.json          # structured metadata (provenance, stats)
+  manifest.sha256            # sha256 of every emitted file
+  README.md                  # auto-generated dataset card with embedded plots
+  analysis/                  # diagnostic plots
+    class_counts.png         # per-class label count, stacked by split
+    archive_class.png        # archive × class instance heatmap
+    bbox_centers.png         # bbox center heatmap per class (page-normalised)
+    bbox_size.png            # bbox area / page area, per class
+    bbox_aspect.png          # w/h aspect ratio, per class
+    page_aspect.png          # page width/height distribution
+    labels_per_image.png     # labels-per-page distribution
+    preview.png              # 4×4 sample mosaic with bboxes drawn
+  train/
+    images/<paper_id>__page_<NNN>.jpg
+    labels/<paper_id>__page_<NNN>.txt
+  valid/
+    images/...
+    labels/...
+  test/
+    images/...
+    labels/...
 ```
 
-Each `.txt` has one row per instance:
+`data.yaml` is fully relative — `path:` is intentionally omitted, and
+`train` / `val` / `test` use `../train/images` style so the dataset
+directory is portable (tar/zip + ship anywhere). Each `.txt` has one
+row per instance:
 
 ```
 <class_index> <cx_norm> <cy_norm> <w_norm> <h_norm>
 ```
 
-Classes are listed in the order `figure / figure_cap / table / table_cap /
-algorithm / algorithm_cap / listing / listing_cap`.
+### Per-export disable flags
 
-By default images are **copied** (not symlinked) so the dataset ships
-cleanly to a remote training host that doesn't have the pipeline's
-source tree; `--symlink` is a dev-only opt-in and only works when the
-format matches and `--max-short-side 0`.
+`--no-readme`, `--no-meta`, `--no-train-yaml`, `--no-manifest`,
+`--no-verify` each disable one of the auto-generated artifacts. Verify
+runs by default — it walks every emitted label file and checks every
+row parses, every class index is in range, every coordinate is in
+`[0, 1]`, and every image opens via PIL.
+
+### Training the exported dataset
+
+```bash
+cd runs/yolo_full_4label
+yolo train cfg=train_recommended.yaml
+```
+
+The config presets `imgsz=1280`, mosaic on, vertical-flip off
+(caption-below relation must be preserved), and per-class weights
+inverse-proportional to that export's actual class frequencies (clipped
+to `[1.0, 30.0]`). Override anything via `key=value` on the CLI.
 
 ## Known limitations
 

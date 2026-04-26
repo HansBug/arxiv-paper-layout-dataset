@@ -21,15 +21,99 @@ Given an arXiv LaTeX source tree, the pipeline:
 
 ```
 src/arxiv_layout/
-  injector.py     # regex-based LaTeX rewriter. Macros \alxwrap, \alxmark.
-  extractor.py    # .aux + .log parsing. Anchor / BoxDims / MarkDims / PageInfo.
-  render.py       # sp->pt->pixel projection; cap<->body union; COCO emission.
-  visualize.py    # PIL-drawn bboxes on top of PyMuPDF page rasters.
-  pipeline.py     # end-to-end per-paper driver (copy src, inject, compile, render).
+  injector.py       # regex-based LaTeX rewriter. Macros \alxwrap, \alxmark.
+  extractor.py      # .aux + .log parsing. Anchor / BoxDims / MarkDims / PageInfo.
+  render.py         # sp->pt->pixel projection; cap<->body union; COCO emission.
+  visualize.py      # PIL-drawn bboxes on top of PyMuPDF page rasters.
+  pipeline.py       # end-to-end per-paper driver (copy src, inject, compile, render).
+  spatial_pair.py   # body/cap spatial-pair predicates. Used by export filter,
+                    #   corpus snapshot, and the driver's per-paper sp tag.
+                    #   CLASS_SUBSETS = {"4","6","8"} also lives here.
+  corpus.py         # CorpusState + BalancedQueryStrategy + slug helpers for
+                    #   the continuous-crawl pipeline.
+
 scripts/
-  build_dataset.py  # CLI entrypoint.
-tests/              # golden-output regression tests (see below).
+  build_dataset.py        # one-shot CLI driver over an existing source tree.
+  run_corpus_pipeline.py  # continuous arxiv crawler: BQS picks (archive, year),
+                          #   downloads e-prints, runs pipeline, writes
+                          #   state.json atomically. control.json is a hot-reload
+                          #   intervention hook (skip_primary_cats /
+                          #   skip_archive_query / force_next_archive).
+  corpus_snapshot.py      # one-shot health snapshot from state.json: SUBSETS
+                          #   table, fail reasons, archive coverage. Used by
+                          #   the slow-monitor loop.
+  corpus_stats.py         # human-readable archive/year/category histograms.
+  export_yolo.py          # corpus -> Ultralytics YOLO. Roboflow-style layout,
+                          #   --kinds + --mode for cap-only/box-only/both
+                          #   ablations, parallel emit, --neg-ratio cap, full
+                          #   dataset card (README + analysis/*.png +
+                          #   dataset_meta.json + train_recommended.yaml +
+                          #   manifest.sha256). See ## Export to YOLO below.
+  fetch_arxiv_catalog.py  # bulk arxiv metadata across all 20 archives -> Parquet.
+  fetch_test_papers.py    # downloads ~32 algorithm/listing-rich seed papers.
+  feishu_corpus_b.py      # optional: pushes Monitor B's snapshot as a Feishu
+                          #   v2 interactive card via webhook.
+  notify_feishu.py        # underlying Feishu schema-2.0 card POST helper.
+  regen_golden.py         # rewrite tests/golden/<paper>.json from the current
+                          #   pipeline output (use after intentional bbox change).
+  qc_check.py             # quick sanity scan: bbox-vs-body containment, etc.
+
+tests/                    # golden-output regression tests (see below).
 ```
+
+## Where the live corpus lives
+
+```
+runs/corpus/
+  state.json             # source of truth. {papers: {arxiv_id: record}, stats}
+  control.json           # hot-reload intervention hook (read every BQS pick)
+  workspaces/            # per-paper output (same shape as runs/v2_validated)
+    <slug>/dataset/annotations.json
+    <slug>/pages/page_NNN.png
+    <slug>/qc/page_NNN.png
+  driver.log             # human-readable run log
+```
+
+`state.json` is written atomically (tmp + rename), so SIGINT / OOM /
+preemption never corrupt the corpus. Re-launching `run_corpus_pipeline.py`
+resumes from `state.json` and skips already-logged papers (OK or fail).
+
+## Export to YOLO
+
+`scripts/export_yolo.py` turns either the seed
+`runs/v2_validated/` + `runs/v2_extra/` or the live
+`runs/corpus/workspaces/` into a Roboflow-style YOLO dataset. The script
+is fully documented in `README.md` (## Export to Ultralytics YOLO format)
+and has its own self-explanatory `--help`. Key surface for agents:
+
+- `--kinds figure,table[,algorithm[,listing]]` + `--mode both|box-only|cap-only`
+  decide what classes land in the YOLO output. The paper-level
+  spatial-pair filter still uses the full `(body, cap)` pair set in
+  every mode, so `box-only` / `cap-only` is purely an output projection
+  — it does NOT weaken the structural sanity check.
+- `--sample N` + `--sample-strategy balanced|class-balanced|by-archive|random`
+  + `--neg-ratio` produce small smoke-test slices. `--neg-ratio` also
+  works in full (no-sample) mode and downsamples negatives to hit the
+  requested final-dataset ratio (recommended `0.3` for training).
+- `--workers N` parallelises both candidate enumeration (per-paper
+  spatial-pair check + label gen) and image emit (per-page resize +
+  JPEG encode). Default `min(16, cpu_count)`. PIL releases the GIL on
+  heavy ops so threads scale near-linearly.
+- Every export writes `data.yaml` (Roboflow `../train/images` style,
+  no `path:` field), `train_recommended.yaml`, `dataset_meta.json`,
+  `manifest.sha256`, `README.md`, and `analysis/*.png`. Disable any
+  with the matching `--no-…` flag.
+- Splits stay deterministic across runs: filename stem
+  (`<arxiv_id>__page_<NNN>`) hashed by `sha256 % 10` →
+  `0-7 train / 8 val / 9 test`. Sampling and `--neg-ratio` never move
+  a page across splits.
+
+When extending export functionality, the canonical extension points
+are `_collect_candidates` (per-paper filter + label gen),
+`_sample_candidates` (selection strategies), `_emit_candidates`
+(per-page write + stats accumulation), and `write_dataset_card`
+(plots + README). The dataset card readers live in `_save_*` and
+`_write_readme` / `_write_dataset_meta` / `_write_train_yaml`.
 
 ## Ground rules when editing
 
