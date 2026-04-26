@@ -139,11 +139,57 @@ from arxiv_layout.spatial_pair import (  # noqa: E402
 
 CLASS_TO_INDEX = {name: idx for idx, name in enumerate(CLASSES)}
 
+# The valid set of "kinds" the user can request. Each kind contributes
+# its body class (e.g. ``figure``) and/or its caption class
+# (``figure_cap``) to the output, depending on --mode.
+KINDS_VALID: tuple[str, ...] = ("figure", "table", "algorithm", "listing")
+
 # Map internal split key -> directory name on disk. We keep ``val`` as
 # the internal key (Counters, stats) but write the canonical Roboflow
 # layout (``valid/`` on disk) so the resulting dataset slots into any
 # Ultralytics tooling that expects ``../valid/images``-style paths.
 SPLIT_DIRS = {"train": "train", "val": "valid", "test": "test"}
+
+
+def compute_output_classes(
+    kinds: list[str], mode: str
+) -> tuple[str, ...]:
+    """Translate ``(kinds, mode)`` -> ordered tuple of YOLO class names.
+
+    ``mode`` ∈ {``both``, ``box-only``, ``cap-only``}::
+
+        kinds=[figure, table], mode=both       -> (figure, figure_cap,
+                                                   table, table_cap)
+        kinds=[figure, table], mode=box-only   -> (figure, table)
+        kinds=[figure, table], mode=cap-only   -> (figure_cap, table_cap)
+        kinds=[figure, table, algorithm], both -> 6 classes
+    """
+    if mode == "both":
+        out: list[str] = []
+        for k in kinds:
+            out.append(k)
+            out.append(f"{k}_cap")
+        return tuple(out)
+    if mode == "box-only":
+        return tuple(kinds)
+    if mode == "cap-only":
+        return tuple(f"{k}_cap" for k in kinds)
+    raise ValueError(f"unknown mode {mode!r}")
+
+
+def compute_spatial_pair_classes(kinds: list[str]) -> tuple[str, ...]:
+    """Classes that participate in the paper-level spatial-pair filter.
+
+    Even when the *output* is box-only or cap-only, the spatial-pair
+    sanity check still wants the full ``(body, cap)`` pair set so that
+    ``paper_passes_spatial_pairing`` can verify each body sits inside
+    a cap. So the filter set is always ``body + cap`` for every kind.
+    """
+    out: list[str] = []
+    for k in kinds:
+        out.append(k)
+        out.append(f"{k}_cap")
+    return tuple(out)
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +358,7 @@ def _process_one_paper(
     weights: tuple[int, int, int],
     active_classes: tuple[str, ...],
     class_to_index: dict[str, int],
+    filter_classes: tuple[str, ...],
     filter_mode: str,
     spatial_iou_thresh: float,
     include_negatives: bool,
@@ -340,15 +387,19 @@ def _process_one_paper(
         annotations = json.loads(ann_path.read_text(encoding="utf-8"))
     except Exception:
         return out
+    # Paper-level filter uses the *full* (body, cap) pair set even
+    # when the output is restricted (box-only / cap-only). Otherwise
+    # the filter would skip checks for pairs whose other half isn't
+    # in the output and accept structurally-broken papers.
     if filter_mode == "strict":
         if not paper_passes_strict_1to1(
-            annotations, active_classes, spatial_iou_thresh
+            annotations, filter_classes, spatial_iou_thresh
         ):
             out["delta"]["skipped_papers_not_1to1"] += 1
             return out
     elif filter_mode == "spatial":
         if not paper_passes_spatial_pairing(
-            annotations, active_classes, spatial_iou_thresh
+            annotations, filter_classes, spatial_iou_thresh
         ):
             out["delta"]["skipped_papers_no_spatial_pair"] += 1
             return out
@@ -414,6 +465,7 @@ def _collect_candidates(
     inputs: list[Path],
     weights: tuple[int, int, int],
     active_classes: tuple[str, ...],
+    filter_classes: tuple[str, ...],
     filter_mode: str,
     spatial_iou_thresh: float,
     include_negatives: bool,
@@ -446,9 +498,10 @@ def _collect_candidates(
         for paper_id, ann_path, pages_dir, seed in paper_jobs:
             r = _process_one_paper(
                 paper_id, ann_path, pages_dir, weights, active_classes,
-                class_to_index, filter_mode, spatial_iou_thresh,
-                include_negatives, archive_lookup, min_bbox_area,
-                max_labels_per_paper, max_pages_per_paper, seed,
+                class_to_index, filter_classes, filter_mode,
+                spatial_iou_thresh, include_negatives, archive_lookup,
+                min_bbox_area, max_labels_per_paper,
+                max_pages_per_paper, seed,
             )
             candidates.extend(r["candidates"])
             for k, v in r["delta"].items():
@@ -460,9 +513,10 @@ def _collect_candidates(
             ex.submit(
                 _process_one_paper,
                 paper_id, ann_path, pages_dir, weights, active_classes,
-                class_to_index, filter_mode, spatial_iou_thresh,
-                include_negatives, archive_lookup, min_bbox_area,
-                max_labels_per_paper, max_pages_per_paper, seed,
+                class_to_index, filter_classes, filter_mode,
+                spatial_iou_thresh, include_negatives, archive_lookup,
+                min_bbox_area, max_labels_per_paper,
+                max_pages_per_paper, seed,
             )
             for paper_id, ann_path, pages_dir, seed in paper_jobs
         ]
@@ -1523,6 +1577,9 @@ def _write_dataset_meta(
     min_bbox_area: float,
     max_pages_per_paper: int,
     max_labels_per_paper: int,
+    kinds: list[str] | None = None,
+    mode: str = "both",
+    filter_classes: tuple[str, ...] | None = None,
 ) -> None:
     payload = {
         "schema_version": 1,
@@ -1530,6 +1587,11 @@ def _write_dataset_meta(
         "git_commit": _git_commit_short(),
         "generator_command": args_repr,
         "classes": list(active_classes),
+        "kinds": list(kinds) if kinds else None,
+        "mode": mode,
+        "filter_classes": (
+            list(filter_classes) if filter_classes else None
+        ),
         "filter": {
             "mode": filter_mode,
             "spatial_iou_thresh": spatial_iou_thresh,
@@ -1881,6 +1943,9 @@ def export(
     max_pages_per_paper: int = 0,
     max_labels_per_paper: int = 0,
     workers: int = 8,
+    filter_classes: tuple[str, ...] | None = None,
+    kinds: list[str] | None = None,
+    mode: str = "both",
 ) -> dict[str, int]:
     """Orchestrate the full export."""
     out.mkdir(parents=True, exist_ok=True)
@@ -1932,10 +1997,25 @@ def export(
 
     archive_lookup = _load_archive_lookup(corpus_state, inputs)
 
+    # If the caller didn't specify filter_classes explicitly, derive
+    # the (body, cap) pair set from active_classes by adding any
+    # missing half. This keeps the spatial-pair check honest even
+    # when the YOLO output is restricted (e.g. box-only).
+    if filter_classes is None:
+        kinds_seen: list[str] = []
+        seen_set: set[str] = set()
+        for c in active_classes:
+            base = c[:-4] if c.endswith("_cap") else c
+            if base not in seen_set:
+                kinds_seen.append(base)
+                seen_set.add(base)
+        filter_classes = compute_spatial_pair_classes(kinds_seen)
+
     candidates = _collect_candidates(
         inputs,
         weights,
         active_classes,
+        filter_classes,
         filter_mode,
         spatial_iou_thresh,
         include_negatives,
@@ -2057,6 +2137,9 @@ def export(
             min_bbox_area,
             max_pages_per_paper,
             max_labels_per_paper,
+            kinds=kinds,
+            mode=mode,
+            filter_classes=filter_classes,
         )
 
     if do_verify:
@@ -2160,15 +2243,36 @@ def main() -> int:
         "--classes",
         type=parse_classes,
         default=None,
-        help="comma-separated subset of classes to export. Output index "
-        "matches CLI order. Mutually exclusive with --subset.",
+        help="Escape hatch — comma-separated EXACT class list "
+        "(e.g. 'figure,figure_cap'). Output index matches CLI order. "
+        "Mutually exclusive with --subset / --kinds.",
     )
     cls_group.add_argument(
         "--subset",
         choices=tuple(CLASS_SUBSETS.keys()),
         default=None,
-        help="shorthand for the canonical 4/6/8-label class set "
-        "(see arxiv_layout.spatial_pair.CLASS_SUBSETS).",
+        help="Legacy shorthand for the canonical 4/6/8 class set. "
+        "Equivalent to --kinds figure,table[,algorithm[,listing]] "
+        "with --mode both. Prefer --kinds + --mode for new code.",
+    )
+    cls_group.add_argument(
+        "--kinds",
+        type=str,
+        default=None,
+        help="Comma-separated kinds (no _cap suffix) to include. "
+        "Each kind contributes class entries according to --mode. "
+        f"Valid: {','.join(KINDS_VALID)}. Default: figure,table.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("both", "box-only", "cap-only"),
+        default="both",
+        help="Which YOLO classes to emit per kind: 'both' (default) "
+        "outputs body + caption (figure + figure_cap), 'box-only' "
+        "drops captions, 'cap-only' keeps only the captions. The "
+        "paper-level spatial-pair filter still uses the full "
+        "(body, cap) pair set, so the choice does not weaken the "
+        "structural sanity check.",
     )
 
     filter_group = parser.add_mutually_exclusive_group()
@@ -2331,14 +2435,46 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Resolve --classes / --subset (subset wins if both somehow set, but
-    # they're mutually exclusive at the parser level).
-    if args.subset is not None:
-        active_classes = CLASS_SUBSETS[args.subset]
+    # Resolve --classes / --subset / --kinds. Mutually exclusive at the
+    # parser level — only one will be set. Default (none set) is
+    # --kinds figure,table --mode both = the 4-class figure/table set.
+    kinds: list[str] | None = None
+    if args.kinds is not None:
+        parts = [p.strip() for p in args.kinds.replace(";", ",").split(",") if p.strip()]
+        bad = [p for p in parts if p not in KINDS_VALID]
+        if bad:
+            parser.error(
+                f"--kinds unknown {bad!r}; valid: {list(KINDS_VALID)}"
+            )
+        if len(set(parts)) != len(parts):
+            parser.error(f"--kinds has duplicates: {parts!r}")
+        kinds = parts
+        active_classes = compute_output_classes(kinds, args.mode)
+    elif args.subset is not None:
+        # Map legacy --subset to (kinds, mode=both)
+        subset_kinds = {
+            "4": ["figure", "table"],
+            "6": ["figure", "table", "algorithm"],
+            "8": ["figure", "table", "algorithm", "listing"],
+        }
+        kinds = subset_kinds[args.subset]
+        active_classes = compute_output_classes(kinds, args.mode)
     elif args.classes is not None:
         active_classes = args.classes
+        # Derive kinds from explicit class list so the dataset_meta /
+        # train.yaml still has a kinds field.
+        seen: list[str] = []
+        for c in active_classes:
+            base = c[:-4] if c.endswith("_cap") else c
+            if base not in seen:
+                seen.append(base)
+        kinds = seen
     else:
-        active_classes = CLASSES
+        # Default: figure + table, both body and cap
+        kinds = ["figure", "table"]
+        active_classes = compute_output_classes(kinds, args.mode)
+
+    filter_classes = compute_spatial_pair_classes(kinds) if kinds else None
 
     args_repr = "python3 scripts/export_yolo.py " + " ".join(sys.argv[1:])
 
@@ -2370,6 +2506,9 @@ def main() -> int:
         max_pages_per_paper=args.max_pages_per_paper,
         max_labels_per_paper=args.max_labels_per_paper,
         workers=args.workers,
+        filter_classes=filter_classes,
+        kinds=kinds,
+        mode=args.mode,
     )
     mode = {
         "strict": "strict-1to1",
