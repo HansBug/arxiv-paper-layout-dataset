@@ -507,6 +507,28 @@ def _round_robin_take(
     return result
 
 
+def _cap_negatives(
+    candidates: list[dict], neg_ratio: float, seed: int
+) -> list[dict]:
+    """Downsample negative pages so they end up at ``neg_ratio`` of the
+    final dataset. Positives are always kept; only negatives are
+    randomly thinned. No-op if there are already fewer negatives than
+    the cap, or if ``neg_ratio`` is None / not in (0, 1)."""
+    if neg_ratio is None or not (0.0 < neg_ratio < 1.0):
+        return list(candidates)
+    pos, neg = _split_pos_neg(candidates)
+    if not pos or not neg:
+        return list(candidates)
+    target_total = len(pos) / max(1e-6, 1.0 - neg_ratio)
+    target_neg = int(round(target_total * neg_ratio))
+    if target_neg >= len(neg):
+        return list(candidates)
+    rng = random.Random(seed)
+    neg = list(neg)
+    rng.shuffle(neg)
+    return pos + neg[:target_neg]
+
+
 def _sample_candidates(
     candidates: list[dict],
     n: int,
@@ -1935,6 +1957,11 @@ def export(
             num_classes=len(active_classes),
             neg_ratio=neg_ratio,
         )
+    elif neg_ratio is not None:
+        # Full export with a negative-ratio cap: keep every positive
+        # page, randomly thin the negatives down to the requested
+        # share of the final dataset.
+        candidates = _cap_negatives(candidates, neg_ratio, sample_seed)
     counts["sampled"] = len(candidates)
 
     stats = _emit_candidates(
@@ -2217,9 +2244,13 @@ def main() -> int:
         "--neg-ratio",
         type=float,
         default=None,
-        help="Reserve this fraction of the --sample budget for "
-        "negative pages (e.g. 0.3 -> 30%% negatives). Default: no "
-        "reservation, balanced/class-balanced auto-prefer positives.",
+        help="Target fraction of negative (no-label) pages in the "
+        "final dataset, e.g. 0.3 -> 30%% negatives. Works in two "
+        "modes: (a) with --sample, reserves this fraction of the "
+        "sample budget for negatives; (b) without --sample (full "
+        "export), keeps every positive page and randomly downsamples "
+        "negatives to hit the ratio. Default: no cap (raw 67%% "
+        "negatives are all kept).",
     )
     parser.add_argument(
         "--min-bbox-area",
