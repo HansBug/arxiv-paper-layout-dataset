@@ -1,15 +1,25 @@
 # arxiv-paper-layout-dataset
 
 Build object-detection training data for paper-page layouts straight out of
-arXiv LaTeX sources. Classes are
+arXiv LaTeX sources. Eight classes total — four "kinds", two projections each.
+For every kind we emit a **body bbox** (per content element: one box per
+`\includegraphics`, per `tabular`, per pseudocode block, per `lstlisting`)
+**plus a whole-float bbox** (one box per float, covering body + caption
+together as a single rectangle).
 
-- `figure` / `figure_cap` — a figure's image region, and the whole figure float
-  (image + caption).
-- `table` / `table_cap` — a table's `tabular` grid, and the whole float.
-- `algorithm` / `algorithm_cap` — a pseudocode block, and the float with its
-  title / caption.
-- `listing` / `listing_cap` — a `lstlisting` code block, and the enclosing
-  `listing` float with its caption, when one exists.
+- `figure` (body) / `figure_cap` (whole float) — `\includegraphics` regions
+  and the surrounding `figure` / `figure*` float that wraps body + caption.
+  A 2×2 multi-subfigure float contributes 4 `figure` boxes and 1 `figure_cap`.
+- `table` / `table_cap` — `tabular` grids and the surrounding `table` /
+  `table*` float (multi-tabular floats contribute multiple `table` boxes).
+- `algorithm` / `algorithm_cap` — the pseudocode block, and the surrounding
+  `algorithm` / `algorithm2e` float covering body + title.
+- `listing` / `listing_cap` — `lstlisting` code, and the enclosing `listing`
+  float with its caption (when present).
+
+The trailing `_cap` is a legacy suffix referring to "the bbox anchored at the
+caption" rather than "the caption text region" — the bbox spans the entire
+float (body + caption together), not just the caption text.
 
 The pipeline doesn't rely on PDF rasterisation tricks to guess where things
 are — it asks TeX directly for the coordinates, then projects them onto
@@ -423,7 +433,9 @@ python3 scripts/export_yolo.py \
   --kinds figure,table,algorithm --mode both \
   --neg-ratio 0.3 --workers 32
 
-# Cap-only ablation: train a "where are the captions" detector
+# Cap-only ablation: train a "where are the float regions" detector.
+# (One whole-float bbox per figure/table; covers body + caption together,
+# NOT just the caption text. See --mode help below.)
 python3 scripts/export_yolo.py \
   --input runs/corpus/workspaces \
   --out   runs/yolo_cap_only \
@@ -436,13 +448,28 @@ python3 scripts/export_yolo.py \
 | flag                  | values                                | meaning                                                   |
 |-----------------------|---------------------------------------|-----------------------------------------------------------|
 | `--kinds`             | `figure` / `table` / `algorithm` / `listing`, comma-separated | Which kind families to include (default `figure,table`)    |
-| `--mode`              | `both` / `box-only` / `cap-only`      | Output body, body+cap, or cap only (default `both`)        |
+| `--mode`              | `both` / `box-only` / `cap-only`      | Which projection to emit per kind (default `both`)        |
 | `--subset 4\|6\|8`    | `4` / `6` / `8`                       | Legacy shorthand: `4` = `figure,table`, `6` = `+algorithm`, `8` = `+listing`, all `mode=both`. Mutually exclusive with `--kinds`. |
 | `--classes <a,b,c>`   | exact class list                      | Escape hatch — list exact class names; bypasses kinds/mode |
 
+What `--mode` actually emits:
+
+- **`both`** (default) — both the per-content-element body bbox AND
+  the per-float whole-float bbox. A 2×2 figure with one shared caption
+  contributes 4 `figure` boxes plus 1 `figure_cap` box.
+- **`box-only`** — just the body bboxes. Trains a "where are the
+  individual figures / tables / pseudocode bodies" detector. Multi-
+  panel floats still contribute one box per panel.
+- **`cap-only`** — just the **whole-float** bboxes. Despite the name,
+  these are NOT caption-text bboxes — each spans the entire float
+  region (body + caption together). One box per float. Useful when
+  you want a "find the boundaries of every figure / table / algorithm
+  block on the page" detector, sub-element granularity not required.
+
 Spatial-pair sanity (paper-level filter) **always** uses the full
-`(body, cap)` pair set, even in `box-only` / `cap-only` mode, so the
-structural body-in-cap check is never weakened by an output choice.
+`(body, whole-float)` pair set, even in `box-only` / `cap-only` mode,
+so the structural body-inside-float check is never weakened by an
+output choice.
 
 ### Sampling — when you only want a slice
 
@@ -556,8 +583,11 @@ to `[1.0, 30.0]`). Override anything via `key=value` on the CLI.
 
 ## Known limitations
 
-- `subfigure` / `subcaption` sub-labels are not emitted separately; only
-  the parent `figure_cap` covers the whole float.
+- Per-subfigure caption text (`\subcaption{...}` etc.) is not emitted as
+  a separate label — only the parent float's whole-float bbox
+  (`figure_cap`) is, alongside one body bbox per `\includegraphics`.
+  In other words: every subfigure body is labeled, but only the parent
+  float-with-caption rectangle is labeled (not each subcaption).
 - `minted` code blocks aren't recognised (use the `listings` package).
 - Figures whose only content is a `tikzpicture` use the picture's declared
   bounding box, which may undershoot arrow heads / labels that TikZ draws

@@ -45,10 +45,15 @@ rejects the paper. ``--strict-1to1`` adds a per-page-count constraint
 on top; ``--no-filter`` exports everything.
 
 Subsets:
-- ``--subset 4`` is shorthand for the 4-class figure/table subset.
-- ``--subset 6`` adds algorithm.
-- ``--subset 8`` is the full 8-class set (all caption pairs).
-- Or pass ``--classes a,b,c`` for an explicit list.
+- ``--kinds figure,table[,algorithm[,listing]]`` chooses the kind
+  families. ``--mode both`` (default) emits both the body bbox and the
+  whole-float bbox; ``--mode box-only`` keeps only the per-subfig body
+  bboxes; ``--mode cap-only`` keeps only the whole-float bboxes (one
+  per float, covering body + caption — the ``_cap`` suffix is a
+  historical misnomer; the bbox is NOT the caption-text region).
+- ``--subset 4|6|8`` is the legacy shorthand: ``4 = figure,table``,
+  ``6 = +algorithm``, ``8 = +listing``, all with ``--mode both``.
+- Or pass ``--classes a,b,c`` for an explicit list (escape hatch).
 
 Image processing:
 - Default output format: JPG (``--format jpg``; ``--format png`` keeps PNG).
@@ -140,8 +145,18 @@ from arxiv_layout.spatial_pair import (  # noqa: E402
 CLASS_TO_INDEX = {name: idx for idx, name in enumerate(CLASSES)}
 
 # The valid set of "kinds" the user can request. Each kind contributes
-# its body class (e.g. ``figure``) and/or its caption class
-# (``figure_cap``) to the output, depending on --mode.
+# two possible classes to the output, controlled by --mode:
+#
+#   * "body" class (e.g. ``figure``) — the inner content region. For a
+#     multi-subfigure float, each ``\includegraphics`` / sub-tabular /
+#     etc. gets its own body bbox, so a single 2x2 figure float can
+#     contribute four ``figure`` boxes.
+#   * "float-with-caption" class (e.g. ``figure_cap``) — the whole
+#     float region that holds *both* the body content *and* the
+#     caption. Despite the ``_cap`` suffix, this bbox is NOT the
+#     caption text alone; it covers everything from the first body
+#     element to the last line of the caption (or vice versa for
+#     caption-on-top floats). Exactly one per float.
 KINDS_VALID: tuple[str, ...] = ("figure", "table", "algorithm", "listing")
 
 # Map internal split key -> directory name on disk. We keep ``val`` as
@@ -156,7 +171,23 @@ def compute_output_classes(
 ) -> tuple[str, ...]:
     """Translate ``(kinds, mode)`` -> ordered tuple of YOLO class names.
 
-    ``mode`` ∈ {``both``, ``box-only``, ``cap-only``}::
+    ``mode`` controls which projection of each kind makes it into the
+    YOLO output:
+
+    - ``both`` — emit BOTH the body class (``figure``) AND the
+      whole-float class (``figure_cap``). Body bboxes are per-subfig
+      (so a 2x2 multi-subfigure can contribute four ``figure`` boxes
+      and one ``figure_cap`` for the surrounding float).
+    - ``box-only`` — emit only the body class. Trains a "where are the
+      figure / table bodies" detector. Multi-subfig floats still
+      contribute one box per subfig.
+    - ``cap-only`` — emit only the whole-float class. Trains a "where
+      are the float regions" detector. Despite the ``_cap`` suffix,
+      these bboxes cover the FULL float (body + caption together),
+      not just the caption text. One box per float, regardless of how
+      many subfigs / subtables the float contains.
+
+    Examples::
 
         kinds=[figure, table], mode=both       -> (figure, figure_cap,
                                                    table, table_cap)
@@ -180,10 +211,12 @@ def compute_output_classes(
 def compute_spatial_pair_classes(kinds: list[str]) -> tuple[str, ...]:
     """Classes that participate in the paper-level spatial-pair filter.
 
-    Even when the *output* is box-only or cap-only, the spatial-pair
-    sanity check still wants the full ``(body, cap)`` pair set so that
-    ``paper_passes_spatial_pairing`` can verify each body sits inside
-    a cap. So the filter set is always ``body + cap`` for every kind.
+    Even when the YOLO output is box-only or cap-only, the spatial-pair
+    sanity check still wants the full ``(body, whole-float)`` pair set
+    so that ``paper_passes_spatial_pairing`` can verify each body bbox
+    sits inside the whole-float bbox of the same float. Hence the
+    filter set is always ``body + whole-float`` for every kind, even
+    if only one of those projections will be emitted.
     """
     out: list[str] = []
     for k in kinds:
@@ -1546,9 +1579,20 @@ def _write_readme(
             "this fraction of the page area (kills artifact-tiny boxes)."
         )
     lines.append(
-        "- Caption boxes (`*_cap`) include the caption *region*, not "
-        "just the caption *text*. They cover the full caption as it "
-        "appears in the PDF — mostly multi-line."
+        "- The ``_cap`` suffix is a misnomer kept for historical "
+        "reasons: ``figure_cap`` / ``table_cap`` / etc. are NOT "
+        "caption-text bboxes. Each is the **whole-float bbox** — it "
+        "covers the entire float region from the first body element "
+        "down through the caption (or vice versa for caption-on-top "
+        "floats). One per float, regardless of how many subfigures it "
+        "contains."
+    )
+    lines.append(
+        "- Body boxes (``figure`` / ``table`` / ``algorithm`` / "
+        "``listing``) are per-content-element. A multi-subfigure "
+        "float contributes one ``figure`` box per ``\\includegraphics``, "
+        "all of them spatially contained in the single ``figure_cap`` "
+        "whole-float bbox."
     )
     lines.append(
         "- Boxes are clipped into [0, 1] on emission; `cx / cy / nw / "
@@ -2267,12 +2311,16 @@ def main() -> int:
         "--mode",
         choices=("both", "box-only", "cap-only"),
         default="both",
-        help="Which YOLO classes to emit per kind: 'both' (default) "
-        "outputs body + caption (figure + figure_cap), 'box-only' "
-        "drops captions, 'cap-only' keeps only the captions. The "
-        "paper-level spatial-pair filter still uses the full "
-        "(body, cap) pair set, so the choice does not weaken the "
-        "structural sanity check.",
+        help="Which YOLO classes to emit per kind. 'both' (default) "
+        "emits the body bbox (e.g. figure — per-subfig for multi-panel "
+        "floats) AND the whole-float bbox (figure_cap — covers body + "
+        "caption together, one per float). 'box-only' keeps only the "
+        "per-subfig body bboxes. 'cap-only' keeps only the whole-float "
+        "bbox — despite the name, this is NOT a 'just the caption "
+        "text' detector; the bbox spans the entire float region. "
+        "The paper-level spatial-pair filter always uses the full "
+        "(body, whole-float) pair set, so the choice does not weaken "
+        "the structural sanity check.",
     )
 
     filter_group = parser.add_mutually_exclusive_group()

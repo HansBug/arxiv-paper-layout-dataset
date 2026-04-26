@@ -87,10 +87,22 @@ is fully documented in `README.md` (## Export to Ultralytics YOLO format)
 and has its own self-explanatory `--help`. Key surface for agents:
 
 - `--kinds figure,table[,algorithm[,listing]]` + `--mode both|box-only|cap-only`
-  decide what classes land in the YOLO output. The paper-level
-  spatial-pair filter still uses the full `(body, cap)` pair set in
-  every mode, so `box-only` / `cap-only` is purely an output projection
-  — it does NOT weaken the structural sanity check.
+  decide what classes land in the YOLO output. Naming convention to
+  remember:
+  * **body class** (`figure` / `table` / `algorithm` / `listing`) —
+    the inner content region. Per `\includegraphics` / `tabular` /
+    pseudocode block / `lstlisting`. A multi-subfigure float emits
+    multiple `figure` boxes (one per `\includegraphics`).
+  * **whole-float class** (`figure_cap` / `table_cap` / etc.) — the
+    bounding box of the *entire float* (body + caption together).
+    Despite the `_cap` suffix it is NOT the caption-text region; the
+    suffix is a historical artifact of how the bbox was anchored in
+    the LaTeX injection. Always one per float.
+  `cap-only` therefore trains a "find each whole float" detector,
+  not a "find the captions" detector. The paper-level spatial-pair
+  filter still uses the full `(body, whole-float)` pair set in every
+  mode, so `box-only` / `cap-only` is purely an output projection —
+  it does NOT weaken the structural sanity check.
 - `--sample N` + `--sample-strategy balanced|class-balanced|by-archive|random`
   + `--neg-ratio` produce small smoke-test slices. `--neg-ratio` also
   works in full (no-sample) mode and downsamples negatives to hit the
