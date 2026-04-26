@@ -110,11 +110,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import random
 import shutil
 import subprocess
 import sys
+import time
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -296,6 +299,111 @@ def _git_commit_short() -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _process_one_paper(
+    paper_id: str,
+    ann_path: Path,
+    pages_dir: Path,
+    weights: tuple[int, int, int],
+    active_classes: tuple[str, ...],
+    class_to_index: dict[str, int],
+    filter_mode: str,
+    spatial_iou_thresh: float,
+    include_negatives: bool,
+    archive_lookup: dict[str, str],
+    min_bbox_area: float,
+    max_labels_per_paper: int,
+    max_pages_per_paper: int,
+    rng_seed: int,
+) -> dict:
+    """Per-paper worker for ``_collect_candidates``: returns a dict with
+    the paper's accepted page candidates *and* whatever counter deltas
+    the caller should fold in. All inputs are immutable / per-call so
+    this is safe to call from multiple threads in parallel.
+    """
+    out = {
+        "candidates": [],
+        "delta": {
+            "skipped_no_labels": 0,
+            "skipped_papers_not_1to1": 0,
+            "skipped_papers_no_spatial_pair": 0,
+            "skipped_papers_too_many_labels": 0,
+            "skipped_pages_per_paper_cap": 0,
+        },
+    }
+    try:
+        annotations = json.loads(ann_path.read_text(encoding="utf-8"))
+    except Exception:
+        return out
+    if filter_mode == "strict":
+        if not paper_passes_strict_1to1(
+            annotations, active_classes, spatial_iou_thresh
+        ):
+            out["delta"]["skipped_papers_not_1to1"] += 1
+            return out
+    elif filter_mode == "spatial":
+        if not paper_passes_spatial_pairing(
+            annotations, active_classes, spatial_iou_thresh
+        ):
+            out["delta"]["skipped_papers_no_spatial_pair"] += 1
+            return out
+    size_by_id = {
+        img["id"]: (img["width"], img["height"]) for img in annotations["images"]
+    }
+    file_by_id = {img["id"]: img["file_name"] for img in annotations["images"]}
+    labels = yolo_label_lines(
+        annotations, size_by_id, class_to_index, min_bbox_area
+    )
+    archive = archive_lookup.get(paper_id, "unknown")
+
+    if max_labels_per_paper > 0:
+        total_lab = sum(len(v) for v in labels.values())
+        if total_lab > max_labels_per_paper:
+            out["delta"]["skipped_papers_too_many_labels"] += 1
+            return out
+
+    paper_pages: list[dict] = []
+    for image_id, file_name in file_by_id.items():
+        src_img = pages_dir / file_name
+        if not src_img.is_file():
+            continue
+        rows = labels.get(image_id, [])
+        if not rows and not include_negatives:
+            out["delta"]["skipped_no_labels"] += 1
+            continue
+        stem = build_stem(paper_id, image_id)
+        split = pick_split(stem, weights)
+        paper_pages.append(
+            {
+                "paper_id": paper_id,
+                "image_id": image_id,
+                "src_img": src_img,
+                "stem": stem,
+                "split": split,
+                "rows": rows,
+                "size": size_by_id.get(image_id, (0, 0)),
+                "archive": archive,
+            }
+        )
+
+    if max_pages_per_paper > 0 and len(paper_pages) > max_pages_per_paper:
+        rng = random.Random(rng_seed)
+        pos = [p for p in paper_pages if p["rows"]]
+        neg = [p for p in paper_pages if not p["rows"]]
+        rng.shuffle(neg)
+        merged = pos[:max_pages_per_paper]
+        if len(merged) < max_pages_per_paper:
+            merged += neg[: max_pages_per_paper - len(merged)]
+        else:
+            merged = merged[:max_pages_per_paper]
+        out["delta"]["skipped_pages_per_paper_cap"] += (
+            len(paper_pages) - len(merged)
+        )
+        paper_pages = merged
+
+    out["candidates"] = paper_pages
+    return out
+
+
 def _collect_candidates(
     inputs: list[Path],
     weights: tuple[int, int, int],
@@ -308,97 +416,58 @@ def _collect_candidates(
     min_bbox_area: float = 0.0,
     max_labels_per_paper: int = 0,
     max_pages_per_paper: int = 0,
+    workers: int = 8,
 ) -> list[dict]:
-    """Walk every paper, filter, expand to one entry per page that we'd
-    like to write. Sampling later picks a subset; emission writes them.
+    """Walk every paper, filter, expand to one entry per page.
 
-    ``counts`` is updated with paper-level reject counters so the user
-    can see *why* the corpus shrank between input and output.
+    Per-paper work (json parse + spatial-pair check + label generation)
+    is independent, so we run it through a thread pool. ``counts`` is
+    folded together at the end so callers still see why the corpus
+    shrank between input and output.
     """
     class_to_index = {name: idx for idx, name in enumerate(active_classes)}
-    candidates: list[dict] = []
-    rng = random.Random(0)  # paper-level subsampling is deterministic
 
+    # Stable rng seed per paper (so re-runs with the same input get the
+    # same sub-sampled pages).
+    paper_jobs: list[tuple[str, Path, Path, int]] = []
+    rng_master = random.Random(0)
     for input_root in inputs:
-        for paper_id, ann_path, pages_dir in iter_papers(input_root):
+        for i, (paper_id, ann_path, pages_dir) in enumerate(iter_papers(input_root)):
+            paper_jobs.append((paper_id, ann_path, pages_dir, rng_master.randint(0, 2**31 - 1)))
+
+    candidates: list[dict] = []
+    if workers <= 1:
+        for paper_id, ann_path, pages_dir, seed in paper_jobs:
+            r = _process_one_paper(
+                paper_id, ann_path, pages_dir, weights, active_classes,
+                class_to_index, filter_mode, spatial_iou_thresh,
+                include_negatives, archive_lookup, min_bbox_area,
+                max_labels_per_paper, max_pages_per_paper, seed,
+            )
+            candidates.extend(r["candidates"])
+            for k, v in r["delta"].items():
+                counts[k] = counts.get(k, 0) + v
+        return candidates
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [
+            ex.submit(
+                _process_one_paper,
+                paper_id, ann_path, pages_dir, weights, active_classes,
+                class_to_index, filter_mode, spatial_iou_thresh,
+                include_negatives, archive_lookup, min_bbox_area,
+                max_labels_per_paper, max_pages_per_paper, seed,
+            )
+            for paper_id, ann_path, pages_dir, seed in paper_jobs
+        ]
+        for fut in as_completed(futures):
             try:
-                annotations = json.loads(ann_path.read_text(encoding="utf-8"))
+                r = fut.result()
             except Exception:
                 continue
-            if filter_mode == "strict":
-                if not paper_passes_strict_1to1(
-                    annotations, active_classes, spatial_iou_thresh
-                ):
-                    counts["skipped_papers_not_1to1"] += 1
-                    continue
-            elif filter_mode == "spatial":
-                if not paper_passes_spatial_pairing(
-                    annotations, active_classes, spatial_iou_thresh
-                ):
-                    counts["skipped_papers_no_spatial_pair"] += 1
-                    continue
-            size_by_id = {
-                img["id"]: (img["width"], img["height"]) for img in annotations["images"]
-            }
-            file_by_id = {img["id"]: img["file_name"] for img in annotations["images"]}
-            labels = yolo_label_lines(
-                annotations, size_by_id, class_to_index, min_bbox_area
-            )
-            archive = archive_lookup.get(paper_id, "unknown")
-
-            # max-labels-per-paper rejects the *paper* if its total
-            # active-label count exceeds the cap. This keeps long-tail
-            # mega-papers (>100 labels — ~1% of the corpus, ~6% of all
-            # labels) from dominating gradient updates.
-            if max_labels_per_paper > 0:
-                total_lab = sum(len(v) for v in labels.values())
-                if total_lab > max_labels_per_paper:
-                    counts["skipped_papers_too_many_labels"] += 1
-                    continue
-
-            # Per-paper page candidate list (so max-pages cap can apply
-            # before we add to the global pool). We materialise pages
-            # in a stable, content-addressed order so re-runs give the
-            # same answer.
-            paper_pages: list[dict] = []
-            for image_id, file_name in file_by_id.items():
-                src_img = pages_dir / file_name
-                if not src_img.is_file():
-                    continue
-                rows = labels.get(image_id, [])
-                if not rows and not include_negatives:
-                    counts["skipped_no_labels"] += 1
-                    continue
-                stem = build_stem(paper_id, image_id)
-                split = pick_split(stem, weights)
-                paper_pages.append(
-                    {
-                        "paper_id": paper_id,
-                        "image_id": image_id,
-                        "src_img": src_img,
-                        "stem": stem,
-                        "split": split,
-                        "rows": rows,
-                        "size": size_by_id.get(image_id, (0, 0)),
-                        "archive": archive,
-                    }
-                )
-
-            if max_pages_per_paper > 0 and len(paper_pages) > max_pages_per_paper:
-                # Prefer pages with labels first (so caps don't drop all
-                # the positive pages), then random pick from the rest.
-                pos = [p for p in paper_pages if p["rows"]]
-                neg = [p for p in paper_pages if not p["rows"]]
-                rng.shuffle(neg)
-                merged = pos[:max_pages_per_paper]
-                if len(merged) < max_pages_per_paper:
-                    merged += neg[: max_pages_per_paper - len(merged)]
-                else:
-                    merged = merged[:max_pages_per_paper]
-                counts["skipped_pages_per_paper_cap"] += len(paper_pages) - len(merged)
-                paper_pages = merged
-
-            candidates.extend(paper_pages)
+            candidates.extend(r["candidates"])
+            for k, v in r["delta"].items():
+                counts[k] = counts.get(k, 0) + v
     return candidates
 
 
@@ -600,6 +669,64 @@ def _write_image(
     return w, h
 
 
+def _emit_one(
+    cand: dict,
+    out: Path,
+    copy_images: bool,
+    image_format: str,
+    max_short_side: int,
+    jpg_quality: int,
+    ext: str,
+) -> dict:
+    """Single-page worker: write the image + its YOLO label. Returns a
+    partial-result dict for the main thread to fold into ``stats``.
+
+    This is the unit of work that ``_emit_candidates`` parallelises.
+    PIL releases the GIL during decode/encode/resize so a thread pool
+    sees real CPU concurrency, and the I/O wait on NFS amortises across
+    threads as well.
+    """
+    src_img = cand["src_img"]
+    rows = cand["rows"]
+    split = cand["split"]
+    stem = cand["stem"]
+    archive = cand["archive"]
+
+    dst_img = out / "images" / split / f"{stem}{ext}"
+    dst_lbl = out / "labels" / split / f"{stem}.txt"
+
+    can_symlink = (
+        (not copy_images)
+        and image_format == src_img.suffix.lstrip(".").lower()
+        and max_short_side <= 0
+    )
+    if can_symlink:
+        if dst_img.exists() or dst_img.is_symlink():
+            dst_img.unlink()
+        dst_img.symlink_to(src_img.resolve())
+        with Image.open(src_img) as im:
+            saved_w, saved_h = im.size
+    else:
+        saved_w, saved_h = _write_image(
+            src_img, dst_img, image_format, max_short_side, jpg_quality
+        )
+
+    dst_lbl.write_text(
+        ("\n".join(rows) + "\n") if rows else "", encoding="utf-8"
+    )
+    return {
+        "split": split,
+        "is_negative": not rows,
+        "saved_size": (saved_w, saved_h),
+        "rows": rows,
+        "archive": archive,
+        "paper_id": cand["paper_id"],
+        "stem": stem,
+        "image": dst_img,
+        "label": dst_lbl,
+    }
+
+
 def _emit_candidates(
     candidates: list[dict],
     out: Path,
@@ -609,9 +736,20 @@ def _emit_candidates(
     jpg_quality: int,
     counts: dict[str, int],
     active_classes: tuple[str, ...],
+    workers: int = 8,
+    progress_every: int = 500,
 ) -> dict:
-    """Write images + labels for each candidate. Accumulates statistics
-    needed by the dataset card and returns them as a plain dict.
+    """Write images + labels for every candidate in parallel.
+
+    The expensive step (PIL decode → resize → JPEG encode → disk
+    write) runs in a ``ThreadPoolExecutor`` of ``workers`` threads.
+    Stats accumulation happens serially in the producer side so we
+    don't need any locking — each worker returns a small dict and the
+    main loop folds those into the running ``stats``.
+
+    Pass ``workers=1`` to recover the old sequential behaviour (useful
+    for debugging or when the underlying I/O does not benefit from
+    parallelism).
     """
     ext = f".{image_format}"
     stats: dict = {
@@ -619,59 +757,33 @@ def _emit_candidates(
         "split_positives": Counter(),
         "split_negatives": Counter(),
         "classes_per_split": defaultdict(Counter),
-        "bbox_centers": [],   # list[(cls_idx, cx, cy)]
-        "bbox_sizes": [],     # list[(cls_idx, nw, nh)]
-        "page_sizes": [],     # list[(w, h)] of saved image
+        "bbox_centers": [],
+        "bbox_sizes": [],
+        "page_sizes": [],
         "labels_per_image": [],
         "archives": Counter(),
         "archive_x_class": defaultdict(Counter),
         "papers": set(),
-        "saved_files": [],    # for manifest + preview
+        "saved_files": [],
     }
 
-    for cand in candidates:
-        src_img = cand["src_img"]
-        rows = cand["rows"]
-        split = cand["split"]
-        stem = cand["stem"]
-        archive = cand["archive"]
-        is_negative = not rows
-
-        dst_img = out / "images" / split / f"{stem}{ext}"
-        dst_lbl = out / "labels" / split / f"{stem}.txt"
-
-        can_symlink = (
-            (not copy_images)
-            and image_format == src_img.suffix.lstrip(".").lower()
-            and max_short_side <= 0
-        )
-        if can_symlink:
-            if dst_img.exists() or dst_img.is_symlink():
-                dst_img.unlink()
-            dst_img.symlink_to(src_img.resolve())
-            with Image.open(src_img) as im:
-                saved_w, saved_h = im.size
-        else:
-            saved_w, saved_h = _write_image(
-                src_img, dst_img, image_format, max_short_side, jpg_quality
-            )
-
-        dst_lbl.write_text(
-            ("\n".join(rows) + "\n") if rows else "", encoding="utf-8"
-        )
-
+    def absorb(r: dict) -> None:
+        split = r["split"]
+        is_negative = r["is_negative"]
+        archive = r["archive"]
+        rows = r["rows"]
         counts[split] += 1
         counts["negatives" if is_negative else "positives"] += 1
-
         stats["splits"][split] += 1
         if is_negative:
             stats["split_negatives"][split] += 1
         else:
             stats["split_positives"][split] += 1
+        saved_w, saved_h = r["saved_size"]
         stats["page_sizes"].append((saved_w, saved_h))
         stats["labels_per_image"].append(len(rows))
         stats["archives"][archive] += 1
-        stats["papers"].add(cand["paper_id"])
+        stats["papers"].add(r["paper_id"])
         for row in rows:
             parts = row.split()
             cls_idx = int(parts[0])
@@ -679,19 +791,67 @@ def _emit_candidates(
             stats["bbox_centers"].append((cls_idx, cx, cy))
             stats["bbox_sizes"].append((cls_idx, nw, nh))
             stats["archive_x_class"][archive][active_classes[cls_idx]] += 1
-        # remember this saved image + its labels for downstream tools
         stats["saved_files"].append(
             {
                 "split": split,
-                "image": dst_img,
-                "label": dst_lbl,
-                "stem": stem,
+                "image": r["image"],
+                "label": r["label"],
+                "stem": r["stem"],
                 "archive": archive,
                 "is_negative": is_negative,
                 "saved_size": (saved_w, saved_h),
                 "rows": rows,
             }
         )
+
+    total = len(candidates)
+    if total == 0:
+        return stats
+
+    t0 = time.monotonic()
+
+    if workers <= 1:
+        for i, cand in enumerate(candidates, 1):
+            r = _emit_one(
+                cand, out, copy_images, image_format,
+                max_short_side, jpg_quality, ext,
+            )
+            absorb(r)
+            if progress_every and i % progress_every == 0:
+                elapsed = time.monotonic() - t0
+                rate = i / max(0.001, elapsed)
+                eta = (total - i) / max(0.001, rate)
+                sys.stderr.write(
+                    f"[emit] {i}/{total}  {rate:.1f} img/s  "
+                    f"eta {eta/60:.1f} min\n"
+                )
+        return stats
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [
+            ex.submit(
+                _emit_one, cand, out, copy_images, image_format,
+                max_short_side, jpg_quality, ext,
+            )
+            for cand in candidates
+        ]
+        done = 0
+        for fut in as_completed(futures):
+            try:
+                r = fut.result()
+            except Exception as exc:
+                sys.stderr.write(f"[emit] worker error: {exc}\n")
+                continue
+            absorb(r)
+            done += 1
+            if progress_every and done % progress_every == 0:
+                elapsed = time.monotonic() - t0
+                rate = done / max(0.001, elapsed)
+                eta = (total - done) / max(0.001, rate)
+                sys.stderr.write(
+                    f"[emit] {done}/{total}  {rate:.1f} img/s  "
+                    f"eta {eta/60:.1f} min\n"
+                )
 
     return stats
 
@@ -1447,35 +1607,64 @@ def _write_train_yaml(
     path.write_text("\n".join(body), encoding="utf-8")
 
 
-def _write_manifest(path: Path, stats: dict, out: Path) -> None:
+def _sha256_file(p: Path) -> tuple[str, str]:
+    """sha256 a single file, return ``(rel_or_abs_path_str, hex)``.
+
+    The path is returned as-is so the caller can decide how to
+    relativise it (the worker doesn't know about the ``out`` root).
+    """
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 16), b""):
+            h.update(chunk)
+    return str(p), h.hexdigest()
+
+
+def _write_manifest(
+    path: Path, stats: dict, out: Path, workers: int = 8
+) -> None:
     """Sha256 manifest of every emitted artifact (images + labels +
     plots). Order is stable so re-runs that emit the same files
-    produce a byte-identical manifest."""
-    items: list[tuple[str, str]] = []  # (relpath, sha256)
+    produce a byte-identical manifest. Hashing runs in a thread pool
+    because it is per-file independent and disk-bound."""
+    seen: set[Path] = set()
     files: list[Path] = []
     for entry in stats["saved_files"]:
-        files.append(entry["image"])
-        files.append(entry["label"])
+        for p in (entry["image"], entry["label"]):
+            if p in seen:
+                continue
+            seen.add(p)
+            files.append(p)
     for sub in ("data.yaml", "train_recommended.yaml", "README.md", "dataset_meta.json"):
         p = out / sub
-        if p.is_file():
+        if p.is_file() and p not in seen:
+            seen.add(p)
             files.append(p)
     analysis = out / "analysis"
     if analysis.is_dir():
         for p in sorted(analysis.iterdir()):
-            if p.is_file():
+            if p.is_file() and p not in seen:
+                seen.add(p)
                 files.append(p)
-    seen: set[Path] = set()
-    for p in files:
-        if not p.is_file() or p in seen:
-            continue
-        seen.add(p)
-        h = hashlib.sha256()
-        with open(p, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 16), b""):
-                h.update(chunk)
-        rel = p.relative_to(out)
-        items.append((str(rel), h.hexdigest()))
+
+    items: list[tuple[str, str]] = []
+    if workers <= 1:
+        for p in files:
+            if not p.is_file():
+                continue
+            _, hexd = _sha256_file(p)
+            items.append((str(p.relative_to(out)), hexd))
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(_sha256_file, p) for p in files if p.is_file()]
+            for fut in as_completed(futures):
+                try:
+                    pstr, hexd = fut.result()
+                except Exception:
+                    continue
+                items.append(
+                    (str(Path(pstr).relative_to(out)), hexd)
+                )
     items.sort()
     path.write_text(
         "\n".join(f"{h}  {rel}" for rel, h in items) + "\n",
@@ -1649,6 +1838,7 @@ def export(
     min_bbox_area: float = 0.0,
     max_pages_per_paper: int = 0,
     max_labels_per_paper: int = 0,
+    workers: int = 8,
 ) -> dict[str, int]:
     """Orchestrate the full export."""
     out.mkdir(parents=True, exist_ok=True)
@@ -1693,6 +1883,7 @@ def export(
         min_bbox_area=min_bbox_area,
         max_labels_per_paper=max_labels_per_paper,
         max_pages_per_paper=max_pages_per_paper,
+        workers=workers,
     )
     counts["candidates"] = len(candidates)
 
@@ -1716,6 +1907,7 @@ def export(
         jpg_quality,
         counts,
         active_classes,
+        workers=workers,
     )
 
     # Per-split per-class counts (emit only fills aggregates).
@@ -1807,7 +1999,7 @@ def export(
             print(f"[verify] OK ({img_n} images checked)")
 
     if write_manifest:
-        _write_manifest(out / "manifest.sha256", stats, out)
+        _write_manifest(out / "manifest.sha256", stats, out, workers=workers)
 
     return counts
 
@@ -2048,6 +2240,15 @@ def main() -> int:
         help="Path to corpus state.json (default: auto-detected at "
         "`<input>/../state.json`).",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=min(16, (os.cpu_count() or 4)),
+        help="Worker thread count for image emit + manifest hashing. "
+        "PIL releases the GIL during heavy ops so threads scale near "
+        "linearly until I/O saturates. Default: min(16, cpu_count). "
+        "Use 1 for sequential; bump higher on big NFS-backed runs.",
+    )
     args = parser.parse_args()
 
     # Resolve --classes / --subset (subset wins if both somehow set, but
@@ -2088,6 +2289,7 @@ def main() -> int:
         min_bbox_area=args.min_bbox_area,
         max_pages_per_paper=args.max_pages_per_paper,
         max_labels_per_paper=args.max_labels_per_paper,
+        workers=args.workers,
     )
     mode = {
         "strict": "strict-1to1",
