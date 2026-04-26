@@ -1842,9 +1842,16 @@ def export(
 ) -> dict[str, int]:
     """Orchestrate the full export."""
     out.mkdir(parents=True, exist_ok=True)
+    # Clean any leftover images/labels from a previous (possibly aborted)
+    # run into the same output dir. Without this, an interrupted run
+    # leaves orphan files that survive into the next export and confuse
+    # the manifest / verify counts.
     for subset in ("train", "val", "test"):
-        (out / "images" / subset).mkdir(parents=True, exist_ok=True)
-        (out / "labels" / subset).mkdir(parents=True, exist_ok=True)
+        for kind in ("images", "labels"):
+            d = out / kind / subset
+            if d.exists():
+                shutil.rmtree(d)
+            d.mkdir(parents=True, exist_ok=True)
 
     counts: dict[str, int] = {
         "train": 0,
