@@ -139,6 +139,12 @@ from arxiv_layout.spatial_pair import (  # noqa: E402
 
 CLASS_TO_INDEX = {name: idx for idx, name in enumerate(CLASSES)}
 
+# Map internal split key -> directory name on disk. We keep ``val`` as
+# the internal key (Counters, stats) but write the canonical Roboflow
+# layout (``valid/`` on disk) so the resulting dataset slots into any
+# Ultralytics tooling that expects ``../valid/images``-style paths.
+SPLIT_DIRS = {"train": "train", "val": "valid", "test": "test"}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -692,8 +698,9 @@ def _emit_one(
     stem = cand["stem"]
     archive = cand["archive"]
 
-    dst_img = out / "images" / split / f"{stem}{ext}"
-    dst_lbl = out / "labels" / split / f"{stem}.txt"
+    split_dir = SPLIT_DIRS[split]
+    dst_img = out / split_dir / "images" / f"{stem}{ext}"
+    dst_lbl = out / split_dir / "labels" / f"{stem}.txt"
 
     can_symlink = (
         (not copy_images)
@@ -1407,9 +1414,17 @@ def _write_readme(
     lines.append("    labels_per_image.png")
     lines.append("    preview.png")
     lines.append(
-        f"  images/{{train,val,test}}/<paper_id>__page_NNN.{image_format}"
+        f"  train/images/<paper_id>__page_NNN.{image_format}"
     )
-    lines.append("  labels/{train,val,test}/<paper_id>__page_NNN.txt")
+    lines.append("  train/labels/<paper_id>__page_NNN.txt")
+    lines.append(
+        f"  valid/images/<paper_id>__page_NNN.{image_format}"
+    )
+    lines.append("  valid/labels/<paper_id>__page_NNN.txt")
+    lines.append(
+        f"  test/images/<paper_id>__page_NNN.{image_format}"
+    )
+    lines.append("  test/labels/<paper_id>__page_NNN.txt")
     lines.append("```")
     lines.append("")
 
@@ -1689,8 +1704,9 @@ def verify_dataset(out: Path, num_classes: int) -> tuple[int, int, list[str]]:
     issues: list[str] = []
     img_count = 0
     for split in ("train", "val", "test"):
-        img_dir = out / "images" / split
-        lbl_dir = out / "labels" / split
+        split_dir = SPLIT_DIRS[split]
+        img_dir = out / split_dir / "images"
+        lbl_dir = out / split_dir / "labels"
         if not img_dir.is_dir():
             continue
         for img in sorted(img_dir.iterdir()):
@@ -1849,10 +1865,22 @@ def export(
     # Clean any leftover images/labels from a previous (possibly aborted)
     # run into the same output dir. Without this, an interrupted run
     # leaves orphan files that survive into the next export and confuse
-    # the manifest / verify counts.
-    for subset in ("train", "val", "test"):
+    # the manifest / verify counts. Layout is Roboflow-style:
+    # ``<out>/<split_dir>/{images,labels}/`` where split_dir is one of
+    # train/valid/test.
+    # Wipe legacy ``<out>/images/{train,val,test}`` if present so old
+    # exports don't pollute new runs.
+    for legacy in ("images", "labels"):
+        legacy_root = out / legacy
+        if legacy_root.is_dir():
+            for split_legacy in ("train", "val", "valid", "test"):
+                d = legacy_root / split_legacy
+                if d.is_dir():
+                    shutil.rmtree(d)
+    for split in ("train", "val", "test"):
+        split_dir = SPLIT_DIRS[split]
         for kind in ("images", "labels"):
-            d = out / kind / subset
+            d = out / split_dir / kind
             if d.exists():
                 shutil.rmtree(d)
             d.mkdir(parents=True, exist_ok=True)
@@ -1928,20 +1956,26 @@ def export(
             stats["classes_per_split"][cand["split"]][active_classes[cls_idx]] += 1
 
     data_yaml = out / "data.yaml"
-    # ``path: .`` keeps the spec relative to the data.yaml location so
-    # the whole dataset directory is portable: tar it up, move it
-    # anywhere, ``yolo train data=data.yaml`` keeps working as long as
-    # the working dir is the dataset root.
+    # Roboflow-style data.yaml: train/val/test paths use ``../`` so they
+    # resolve against the *parent* of the data.yaml's resolved path.
+    # Layout on disk:
+    #     <root>/
+    #       data.yaml
+    #       train/images/...
+    #       valid/images/...
+    #       test/images/...
+    # ``path:`` is intentionally omitted — having it confuses several
+    # downstream consumers that prefer the Roboflow flat layout.
+    names_inline = "[" + ", ".join(f"'{n}'" for n in active_classes) + "]"
     data_yaml.write_text(
         "\n".join(
             [
-                "path: .",
-                "train: images/train",
-                "val: images/val",
-                "test: images/test",
+                "train: ../train/images",
+                "val: ../valid/images",
+                "test: ../test/images",
                 "",
-                "names:",
-                *[f"  {idx}: {name}" for idx, name in enumerate(active_classes)],
+                f"nc: {len(active_classes)}",
+                f"names: {names_inline}",
                 "",
             ]
         ),
